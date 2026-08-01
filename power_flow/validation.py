@@ -1449,6 +1449,43 @@ def find_starbus_low_x(mpc: MatpowerCase) -> Dict[int, int]:
     return bus_del_to_keep
 
 
+def is_buses_short_circuited(bus1: BusEnergyBalance, bus2: BusEnergyBalance):
+    if abs(bus1.va - bus2.va) < 0.1:  # abs(bus1.vm - bus2.vm) < 0.01 and
+        return True
+
+    return False
+
+
+def find_low_x_branches(
+    mpc: MatpowerCase,
+    id_to_bus: Dict[int, BusEnergyBalance],
+    x_threshold: float = 0.001,
+) -> Dict[int, int]:
+    g = nx.Graph()
+    for br in mpc.branch:
+        if abs(br.br_x) > x_threshold:
+            continue
+        if not is_buses_short_circuited(id_to_bus[br.f_bus], id_to_bus[br.t_bus]):
+            continue
+        g.add_edge(br.f_bus, br.t_bus)
+
+    cc = list(nx.connected_components(g))
+
+    bus_del_to_keep = {}
+    for island in cc:
+        bus_to_keep = None
+        for bus in island:
+            if bus not in mpc.star_buses:
+                bus_to_keep = bus
+                break
+        assert bus_to_keep is not None
+        for bus in island:
+            if bus != bus_to_keep:
+                bus_del_to_keep[bus] = bus_to_keep
+
+    return bus_del_to_keep
+
+
 def open_branch_connect_to_del_buses(
     mpc: MatpowerCase, bus_del_to_keep: Dict[int, int]
 ) -> MatpowerCase:
@@ -1503,15 +1540,24 @@ if __name__ == "__main__":
     from psse_raw import parse_raw
     from matpow import MatpowerCase
 
-    raw_file = (
-        "/usr/local/google/home/sxzhou/Downloads/2025 Series RTEP 2030 SUM_06182025.raw"
+    # raw_file = (
+    #     "/usr/local/google/home/sxzhou/Downloads/2025 Series RTEP 2030 SUM_06182025.raw"
+    # )
+
+    # print(f"Loading and converting RAW file: {raw_file}")
+    # raw_data = parse_raw(raw_file)
+    # mpc = MatpowerCase.from_psse(raw_data)
+
+    mpc = MatpowerCase.from_mat(
+        "/usr/local/google/home/sxzhou/Downloads/main_island.mat"
     )
 
-    print(f"Loading and converting RAW file: {raw_file}")
-    raw_data = parse_raw(raw_file)
-    mpc = MatpowerCase.from_psse(raw_data)
-
     mpc = set_gen_bus_to_pv(mpc)
+    id_to_bus = build_bus_energy_balances(mpc)
+    bus_del_to_keep = find_low_x_branches(mpc, id_to_bus, x_threshold=0.001)
+    mpc = open_branch_connect_to_del_buses(mpc, bus_del_to_keep)
+    mpc = replace_bus_ids(mpc, bus_del_to_keep)
+
     # bus_del_to_keep = find_starbus_low_x(mpc)
     # mpc = open_branch_connect_to_del_buses(mpc, bus_del_to_keep)
     # mpc = replace_bus_ids(mpc, bus_del_to_keep)
@@ -1530,25 +1576,24 @@ if __name__ == "__main__":
     print_branch_large_flows(id_to_bus, mpc, top_n=10)
 
     # Verify dictionary export with numpy matrices
-    # d = mpc.to_dict()
-    # print("\nMATPOWER dictionary matrix shapes:")
-    # print(f"  bus matrix:    {d['bus'].shape}")
-    # print(f"  gen matrix:    {d['gen'].shape}")
-    # print(f"  branch matrix: {d['branch'].shape}")
+    d = mpc.to_dict()
+    print("\nMATPOWER dictionary matrix shapes:")
+    print(f"  bus matrix:    {d['bus'].shape}")
+    print(f"  gen matrix:    {d['gen'].shape}")
+    print(f"  branch matrix: {d['branch'].shape}")
 
-    # from pypower.api import runpf
-    # from pypower.ppoption import ppoption
+    from pypower.api import runpf
+    from pypower.ppoption import ppoption
 
-    # ppc = mpc.to_dict()
+    ppc = mpc.to_dict()
 
-    # ppopt = ppoption(
-    #     MODEL="AC",  # AC power flow model
-    #     PF_ALG=1,  # 1 = Newton-Raphson ('NR')
-    #     PF_TOL=1e-8,  # Convergence tolerance
-    #     PF_MAX_IT=1,  # Maximum iteration limit
-    #     ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
-    #     VERBOSE=1,  # 2 = Print detailed progress
-    #     OUT_ALL=1,  # 1 = Print all output sections
-    # )
-    # results, success = runpf(ppc, ppopt)
-    # print(f"\nPower flow converged: {bool(success)}")
+    ppopt = ppoption(
+        MODEL="AC",  # AC power flow model
+        PF_ALG=1,  # 1 = Newton-Raphson ('NR')
+        PF_TOL=1e-8,  # Convergence tolerance
+        PF_MAX_IT=1,  # Maximum iteration limit
+        ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
+        VERBOSE=0,  # 2 = Print detailed progress
+    )
+    results, success = runpf(ppc, ppopt)
+    print(f"\nPower flow converged: {bool(success)}")

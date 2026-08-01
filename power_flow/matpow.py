@@ -16,6 +16,7 @@ import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
@@ -564,9 +565,26 @@ class MatpowerCase:
         base_mva = float(d.get("baseMVA", 100.0))
         version = str(d.get("version", "2"))
 
-        buses = [Bus.from_array(row) for row in d.get("bus", [])]
-        generators = [Generator.from_array(row) for row in d.get("gen", [])]
-        branches = [Branch.from_array(row) for row in d.get("branch", [])]
+        def _ensure_2d(arr: Any) -> Sequence[Any]:
+            if arr is None:
+                return []
+            if isinstance(arr, np.ndarray):
+                if arr.ndim == 0 or arr.size == 0:
+                    return []
+                if arr.ndim == 1:
+                    return [arr]
+                return arr
+            if isinstance(arr, (list, tuple)):
+                if not arr:
+                    return []
+                if not isinstance(arr[0], (list, tuple, np.ndarray)):
+                    return [arr]
+                return arr
+            return arr
+
+        buses = [Bus.from_array(row) for row in _ensure_2d(d.get("bus"))]
+        generators = [Generator.from_array(row) for row in _ensure_2d(d.get("gen"))]
+        branches = [Branch.from_array(row) for row in _ensure_2d(d.get("branch"))]
         gencost = d.get("gencost")
 
         return cls(
@@ -577,6 +595,72 @@ class MatpowerCase:
             branch=branches,
             gencost=gencost,
         )
+
+    @classmethod
+    def from_mat(
+        cls, filepath: Union[str, Path, os.PathLike], struct_name: Optional[str] = None
+    ) -> MatpowerCase:
+        """Load a MATPOWER case directly from a MATLAB .mat file.
+
+        Args:
+            filepath: Path to the .mat file.
+            struct_name: Top-level variable or struct name in the .mat file.
+                If None (default), auto-detects 'mpc', 'mpc_main', or any struct/dict
+                containing power flow components ('bus', 'gen', 'branch').
+
+        Returns:
+            MatpowerCase instance.
+        """
+        from scipy.io import loadmat
+
+        mat = loadmat(str(filepath), struct_as_record=False, squeeze_me=True)
+
+        raw_case = None
+        if struct_name is not None:
+            if struct_name in mat:
+                raw_case = mat[struct_name]
+            else:
+                raise KeyError(f"Struct '{struct_name}' not found in {filepath}. Available keys: {list(mat.keys())}")
+        elif "mpc" in mat:
+            raw_case = mat["mpc"]
+        elif "mpc_main" in mat:
+            raw_case = mat["mpc_main"]
+        elif "bus" in mat and "gen" in mat:
+            raw_case = mat
+        else:
+            # Auto-detect struct containing bus data
+            valid_keys = [k for k in mat.keys() if not k.startswith("__")]
+            for k in valid_keys:
+                val = mat[k]
+                if hasattr(val, "bus") or (isinstance(val, dict) and "bus" in val):
+                    raw_case = val
+                    break
+            if raw_case is None and len(valid_keys) == 1:
+                raw_case = mat[valid_keys[0]]
+
+        if raw_case is None:
+            raise ValueError(
+                f"Could not find a MATPOWER case structure in {filepath}. Available keys: {list(mat.keys())}"
+            )
+
+        if hasattr(raw_case, "bus"):
+            d: Dict[str, Any] = {
+                "version": str(getattr(raw_case, "version", "2")),
+                "baseMVA": float(getattr(raw_case, "baseMVA", 100.0)),
+                "bus": getattr(raw_case, "bus", []),
+                "gen": getattr(raw_case, "gen", []),
+                "branch": getattr(raw_case, "branch", []),
+            }
+            if hasattr(raw_case, "gencost"):
+                d["gencost"] = getattr(raw_case, "gencost")
+        elif isinstance(raw_case, dict):
+            d = raw_case
+        else:
+            raise ValueError(
+                f"Unsupported structure for MATPOWER case inside {filepath}: {type(raw_case)}"
+            )
+
+        return cls.from_dict(d)
 
     @classmethod
     def from_psse(cls, raw: PsseRawData) -> MatpowerCase:
