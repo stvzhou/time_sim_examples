@@ -1,4 +1,4 @@
-"""MATPOWER 5.0 case format classes and PSS/E RAW validation.
+"""MATPOWER 5.0 case format classes, parser, and PSS/E RAW validation.
 
 Follows the MATPOWER 5.0 Case Format specification:
 https://matpower.org/docs/ref/matpower5.0/caseformat.html
@@ -7,12 +7,14 @@ Defines:
 - Bus: MATPOWER bus matrix row representation (columns 1-13 + optional OPF cols)
 - Generator: MATPOWER gen matrix row representation (columns 1-21 + optional OPF cols)
 - Branch: MATPOWER branch matrix row representation (columns 1-13 + optional results cols)
-- MatpowerCase: Complete MATPOWER power flow case container with conversion from PsseRawData.
+- MatpowerCase: Complete MATPOWER power flow case container supporting .m files, .mat files, dicts, and PSS/E RAW conversion.
+- parse_matpower_m: Standalone parser for MATLAB .m case files into MATPOWER dictionary format.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -505,6 +507,166 @@ class Branch:
 
 
 # =============================================================================
+# MATPOWER .m File Parser
+# =============================================================================
+
+
+def parse_matpower_m(filepath_or_str: Union[str, Path, os.PathLike]) -> Dict[str, Any]:
+    """Parse a MATPOWER MATLAB (.m) case file or string into a dictionary of matrices and scalars.
+
+    Supports both MATPOWER Version 2 (e.g. `mpc.bus = [...]`) and Version 1 (e.g. `bus = [...]`)
+    syntax formats, including comments, cell arrays, and scientific notation.
+
+    Args:
+        filepath_or_str: Path to the .m file or string content of the .m file.
+
+    Returns:
+        Dictionary containing keys such as 'version', 'baseMVA', 'bus', 'gen', 'branch',
+        'gencost', etc.
+    """
+    is_path = False
+    try:
+        if isinstance(filepath_or_str, (Path, os.PathLike)) or (
+            isinstance(filepath_or_str, str) and os.path.exists(filepath_or_str)
+        ):
+            is_path = True
+    except Exception:
+        pass
+
+    if is_path:
+        with open(str(filepath_or_str), "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    else:
+        text = str(filepath_or_str)
+
+    # 1. Remove block comments %{ ... %}
+    text = re.sub(r"%\{.*?%\}", "", text, flags=re.DOTALL)
+    # 2. Line continuations ... -> space
+    text = re.sub(r"\.\.\.[^\n]*\n", " ", text)
+
+    # 3. Strip line comments % (taking care not to strip % inside quotes)
+    # Also ignore function declaration header lines (e.g. 'function mpc = case9')
+    cleaned_lines = []
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if trimmed.startswith("function"):
+            continue
+        in_str = False
+        quote_char = ""
+        res = []
+        for char in line:
+            if char in ("'", '"'):
+                if not in_str:
+                    in_str = True
+                    quote_char = char
+                elif char == quote_char:
+                    in_str = False
+            if char == "%" and not in_str:
+                break
+            res.append(char)
+        cleaned_lines.append("".join(res))
+    clean_text = "\n".join(cleaned_lines)
+
+    # 4. Extract variable assignments: (mpc.|case.)?var_name = value
+    result: Dict[str, Any] = {}
+    assign_pattern = re.compile(
+        r"(?:(?:mpc|case)\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*", re.MULTILINE
+    )
+    matches = list(assign_pattern.finditer(clean_text))
+
+    for idx, match in enumerate(matches):
+        var_name = match.group(1)
+        if var_name in ("function", "return", "end", "if", "for", "while"):
+            continue
+        val_start = match.end()
+        val_end = (
+            matches[idx + 1].start() if idx + 1 < len(matches) else len(clean_text)
+        )
+        val_str = clean_text[val_start:val_end].strip()
+
+        # Matrix assignment [...]
+        if val_str.startswith("["):
+            depth = 0
+            end_pos = -1
+            for i, c in enumerate(val_str):
+                if c == "[":
+                    depth += 1
+                elif c == "]":
+                    depth -= 1
+                    if depth == 0:
+                        end_pos = i
+                        break
+            if end_pos != -1:
+                mat_content = val_str[1:end_pos]
+                mat_content = mat_content.replace(";", "\n").replace(",", " ")
+                rows = []
+                for line in mat_content.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    tokens = line.split()
+                    try:
+                        row_vals = [float(t) for t in tokens]
+                        rows.append(row_vals)
+                    except ValueError:
+                        row_vals = []
+                        for t in tokens:
+                            tl = t.lower()
+                            if tl in ("inf", "+inf"):
+                                row_vals.append(float("inf"))
+                            elif tl == "-inf":
+                                row_vals.append(float("-inf"))
+                            elif tl == "nan":
+                                row_vals.append(float("nan"))
+                            else:
+                                try:
+                                    row_vals.append(float(t))
+                                except ValueError:
+                                    try:
+                                        row_vals.append(
+                                            float(eval(t, {"__builtins__": None}, {}))
+                                        )
+                                    except Exception:
+                                        pass
+                        if row_vals:
+                            rows.append(row_vals)
+                if rows:
+                    max_cols = max(len(r) for r in rows)
+                    arr = np.array(
+                        [r + [0.0] * (max_cols - len(r)) for r in rows],
+                        dtype=np.float64,
+                    )
+                    result[var_name] = arr
+                else:
+                    result[var_name] = np.empty((0, 0), dtype=np.float64)
+
+        # Cell array assignment {...}
+        elif val_str.startswith("{"):
+            end_pos = val_str.rfind("}")
+            cell_content = val_str[1:end_pos] if end_pos != -1 else val_str[1:]
+            items = re.findall(r"['\"](.*?)['\"]", cell_content)
+            result[var_name] = items
+
+        # String assignment '...' or "..."
+        elif val_str.startswith("'") or val_str.startswith('"'):
+            q = val_str[0]
+            end_q = val_str.find(q, 1)
+            result[var_name] = (
+                val_str[1:end_q] if end_q != -1 else val_str.strip("'\"\t\r\n; ")
+            )
+
+        # Scalar or simple numeric assignment
+        else:
+            first_term = re.split(r"[;\n]", val_str)[0].strip()
+            try:
+                result[var_name] = float(first_term)
+            except ValueError:
+                result[var_name] = first_term
+
+    return result
+
+
+# =============================================================================
 # MatpowerCase Container
 # =============================================================================
 
@@ -558,6 +720,101 @@ class MatpowerCase:
         if self.gencost is not None:
             d["gencost"] = self.gencost
         return d
+
+    def to_mat(
+        self, filepath: Union[str, Path, os.PathLike], struct_name: str = "mpc"
+    ) -> None:
+        """Save MATPOWER case directly to a MATLAB .mat file.
+
+        Args:
+            filepath: Destination .mat file path.
+            struct_name: Variable/struct name for the case in the .mat file (default: 'mpc').
+        """
+        from scipy.io import savemat
+
+        savemat(str(filepath), {struct_name: self.to_dict()})
+
+    def to_m(
+        self,
+        filepath: Union[str, Path, os.PathLike],
+        case_name: Optional[str] = None,
+    ) -> None:
+        """Save MATPOWER case to a MATLAB .m file.
+
+        Args:
+            filepath: Destination .m file path.
+            case_name: Function name for the MATPOWER case (default: derived from filename).
+        """
+        path = Path(filepath)
+        name = case_name or (path.stem.replace("-", "_").replace(" ", "_") if path.stem else "case_custom")
+
+        lines = [
+            f"function mpc = {name}",
+            f"%% {name.upper()} MATPOWER Case format Version 2",
+            "",
+            "%% MATPOWER Case Format : Version 2",
+            f"mpc.version = '{self.version}';",
+            "",
+            "%%-----  Power Flow Data  -----%%",
+            "%% system MVA base",
+            f"mpc.baseMVA = {self.baseMVA};",
+            "",
+            "%% bus data",
+            "%\tbus_i\ttype\tPd\tQd\tGs\tBs\tarea\tVm\tVa\tbaseKV\tzone\tVmax\tVmin",
+            "mpc.bus = [",
+        ]
+        for b in self.bus:
+            row = b.to_list()
+            row_str = "\t".join(
+                f"{v:g}" if isinstance(v, (int, float)) else str(v) for v in row
+            )
+            lines.append(f"\t{row_str};")
+        lines.append("];\n")
+
+        lines.extend([
+            "%% generator data",
+            "%\tbus\tPg\tQg\tQmax\tQmin\tVg\tmBase\tstatus\tPmax\tPmin\tPc1\tPc2\tQc1min\tQc1max\tQc2min\tQc2max\tramp_agc\tramp_10\tramp_30\tramp_q\tapf",
+            "mpc.gen = [",
+        ])
+        for g in self.gen:
+            row = g.to_list()
+            row_str = "\t".join(
+                f"{v:g}" if isinstance(v, (int, float)) else str(v) for v in row
+            )
+            lines.append(f"\t{row_str};")
+        lines.append("];\n")
+
+        lines.extend([
+            "%% branch data",
+            "%\tfbus\ttbus\tr\tx\tb\trateA\trateB\trateC\tratio\tangle\tstatus\tangmin\tangmax",
+            "mpc.branch = [",
+        ])
+        for br in self.branch:
+            row = br.to_list()
+            row_str = "\t".join(
+                f"{v:g}" if isinstance(v, (int, float)) else str(v) for v in row
+            )
+            lines.append(f"\t{row_str};")
+        lines.append("];\n")
+
+        if self.gencost is not None and len(self.gencost) > 0:
+            lines.extend([
+                "%%-----  OPF Data  -----%%",
+                "%% generator cost data",
+                "%\t1\tstartup\tshutdown\tn\tx1\ty1\t...\txn\tyn",
+                "%\t2\tstartup\tshutdown\tn\tc(n-1)\t...\tc0",
+                "mpc.gencost = [",
+            ])
+            for gc in self.gencost:
+                row_str = "\t".join(
+                    f"{v:g}" if isinstance(v, (int, float)) else str(v) for v in gc
+                )
+                lines.append(f"\t{row_str};")
+            lines.append("];\n")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> MatpowerCase:
@@ -660,6 +917,21 @@ class MatpowerCase:
                 f"Unsupported structure for MATPOWER case inside {filepath}: {type(raw_case)}"
             )
 
+        return cls.from_dict(d)
+
+    @classmethod
+    def from_m(
+        cls, filepath_or_str: Union[str, Path, os.PathLike]
+    ) -> MatpowerCase:
+        """Load a MATPOWER case directly from a MATLAB .m file or .m format string.
+
+        Args:
+            filepath_or_str: Path to the .m file or string content.
+
+        Returns:
+            MatpowerCase instance.
+        """
+        d = parse_matpower_m(filepath_or_str)
         return cls.from_dict(d)
 
     @classmethod

@@ -250,11 +250,14 @@ def calc_flow_into_branch(
     vra: float,
     r: float,
     x: float,
-    b: float = 0.0,
+    b_total: float = 0.0,
+    g_total: float = 0.0,
     shift: float = 0.0,
+    ratio: float = 1.0,
     base_mva: float = 100.0,
 ) -> Flow:
     """Calculate active and reactive power flow INTO a branch at the 'from' bus.
+    https://powsybl.readthedocs.io/projects/powsybl-open-loadflow/en/latest/loadflow/loadflow.html
 
     Supports transmission lines and transformers with off-nominal tap ratio
     and phase shift angle (tap is placed at the 'from' bus side as in MATPOWER).
@@ -273,25 +276,36 @@ def calc_flow_into_branch(
     Returns:
         Flow(p, q) in MW and MVAr leaving the 'from' bus into the branch.
     """
-    shift_rad = np.deg2rad(shift)
-    delta = np.deg2rad(vsa) - np.deg2rad(vra) - shift_rad
-    # r = 0  # TODO
-    z_square = r**2 + x**2
+    if abs(r) < 0.0001 and abs(x) < 0.0001:
+        return Flow(np.deg2rad(vsa - vra) * base_mva, 0)
 
-    if z_square == 0.0:
-        return Flow(0.0, 0.0)
+    a1 = np.deg2rad(shift)
+    g = g_total / 2.0
+    b = b_total / 2.0
+    y = 1 / np.sqrt(r**2 + x**2)
+    ksi = np.arctan2(x, r)
+    theta = ksi - a1 - np.deg2rad(vsa) + np.deg2rad(vra)
 
     # Active power flow into branch at from bus
-    ps = (vsm / z_square) * (
-        vsm * r - r * vrm * np.cos(delta) + x * vrm * np.sin(delta)
+    ps = (
+        ratio
+        * vsm
+        * (
+            g * ratio * vsm
+            + y * ratio * vsm * np.sin(ksi)
+            - y * ratio * vrm * np.sin(theta)
+        )
     )
 
     # Reactive power flow into branch at from bus
-    qs = (vsm / z_square) * (
-        vsm * x
-        - x * vrm * np.cos(delta)
-        + r * vrm * np.sin(delta)
-        - vsm * z_square * (b / 2.0)
+    qs = (
+        ratio
+        * vsm
+        * (
+            -b * ratio * vsm
+            + y * ratio * vsm * np.cos(ksi)
+            - y * ratio * vrm * np.cos(theta)
+        )
     )
 
     return Flow(float(ps * base_mva), float(qs * base_mva))
@@ -304,8 +318,10 @@ def calc_flow_from_branch(
     vra: float,
     r: float,
     x: float,
-    b: float = 0.0,
+    b_total: float = 0.0,
+    g_total: float = 0.0,
     shift: float = 0.0,
+    ratio: float = 1.0,
     base_mva: float = 100.0,
 ) -> Flow:
     """Calculate active and reactive power flow entering the 'to' bus FROM the branch.
@@ -324,25 +340,37 @@ def calc_flow_from_branch(
     Returns:
         Flow(p, q) in MW and MVAr entering the 'to' bus from the branch.
     """
-    # r = 0  # TODO
-    shift_rad = np.deg2rad(shift)
-    delta = np.deg2rad(vsa) - np.deg2rad(vra) - shift_rad
-    z_square = r**2 + x**2
+    if abs(r) < 0.0001 and abs(x) < 0.0001:
+        return Flow(np.deg2rad(vsa - vra) * base_mva, 0)
 
-    if z_square == 0.0:
-        return Flow(0.0, 0.0)
+    a2 = -np.deg2rad(shift)
+    g = g_total / 2.0
+    b = b_total / 2.0
+    y = 1 / np.sqrt(r**2 + x**2)
+    ksi = np.arctan2(x, r)
+    theta = ksi - a2 - np.deg2rad(vra) + np.deg2rad(vsa)
+    ratio = 1 / ratio
 
     # Active power flow entering receiving bus from branch
-    pr = (vrm / z_square) * (
-        -vrm * r + r * vsm * np.cos(delta) + x * vsm * np.sin(delta)
+    pr = (
+        ratio
+        * vrm
+        * (
+            g * ratio * vrm
+            + y * ratio * vrm * np.sin(ksi)
+            - y * ratio * vsm * np.sin(theta)
+        )
     )
 
-    # Reactive power flow entering receiving bus from branch
-    qr = (vrm / z_square) * (
-        -vrm * x
-        + x * vsm * np.cos(delta)
-        - r * vsm * np.sin(delta)
-        + vrm * z_square * (b / 2.0)
+    # Reactive power flow into branch at from bus
+    qr = (
+        ratio
+        * vrm
+        * (
+            -b * ratio * vrm
+            + y * ratio * vrm * np.cos(ksi)
+            - y * ratio * vsm * np.cos(theta)
+        )
     )
 
     return Flow(float(pr * base_mva), float(qr * base_mva))
@@ -1273,7 +1301,7 @@ def print_branch_large_flows(
     print(f"{'TOP BRANCHES WITH LARGEST POWER FLOWS':^80}")
     print("=" * 120)
     print(
-        f"{'From Bus':>10} | {'To Bus':>10} | {'R':>10} | {'X':>10} | {'P Flow (MW)':>16} | {'From Va':>10} | {'To Va':>10} | {'Rate A (MW)':>10}"
+        f"{'From Bus':>10} | {'To Bus':>10} | {'R':>10} | {'X':>10} | {'P Flow (MW)':>16} | {'From Va':>10} | {'To Va':>10} | {'Rate A (MW)':>10} | {'Shift (deg)':>10} | {'Ratio':>10}"
     )
     print("-" * 120)
     bus_id_to_bus = {b.bus_i: b for b in mpc.bus}
@@ -1284,9 +1312,11 @@ def print_branch_large_flows(
         r = mpc.branch[br_idx].br_r
         x = mpc.branch[br_idx].br_x
         ratea = mpc.branch[br_idx].rate_a
+        shift = mpc.branch[br_idx].shift
+        ratio = mpc.branch[br_idx].tap
 
         print(
-            f"{f_bus:10} | {t_bus:10} | {r:10.4f} | {x:10.6f} | {flow:>16.4f} | {bus_id_to_bus[f_bus].va:10.5f} | {bus_id_to_bus[t_bus].va:10.5f} | {ratea:10.4f}"
+            f"{f_bus:10} | {t_bus:10} | {r:10.4f} | {x:10.6f} | {flow:>16.4f} | {bus_id_to_bus[f_bus].va:10.5f} | {bus_id_to_bus[t_bus].va:10.5f} | {ratea:10.4f} | {shift:10.4f} | {ratio:10.4f}"
         )
     print("=" * 120 + "\n")
 
@@ -1463,10 +1493,13 @@ def find_low_x_branches(
 ) -> Dict[int, int]:
     g = nx.Graph()
     for br in mpc.branch:
+        if br.br_r == 0:
+            g.add_edge(br.f_bus, br.t_bus)
+            continue
         if abs(br.br_x) > x_threshold:
             continue
-        if not is_buses_short_circuited(id_to_bus[br.f_bus], id_to_bus[br.t_bus]):
-            continue
+        # if not is_buses_short_circuited(id_to_bus[br.f_bus], id_to_bus[br.t_bus]):
+        #     continue
         g.add_edge(br.f_bus, br.t_bus)
 
     cc = list(nx.connected_components(g))
@@ -1530,6 +1563,14 @@ def replace_bus_ids(mpc: MatpowerCase, bus_del_to_keep: Dict[int, int]) -> Matpo
     return mpc
 
 
+def open_branch_from_to_same_bus(mpc: MatpowerCase) -> MatpowerCase:
+    for br in mpc.branch:
+        if br.f_bus == br.t_bus:
+            br.br_status = 0
+            print(f"Open branch between {br.f_bus} and {br.t_bus} with x = {br.br_x}")
+    return mpc
+
+
 # =============================================================================
 # Execution and Demonstration
 # =============================================================================
@@ -1548,15 +1589,71 @@ if __name__ == "__main__":
     # raw_data = parse_raw(raw_file)
     # mpc = MatpowerCase.from_psse(raw_data)
 
-    mpc = MatpowerCase.from_mat(
-        "/usr/local/google/home/sxzhou/Downloads/main_island.mat"
+    # mpc = MatpowerCase.from_mat(
+    #     "/usr/local/google/home/sxzhou/Downloads/2024Series2029SUM.mat"
+    # )
+    mpc = MatpowerCase.from_m(
+        "/usr/local/google/home/sxzhou/Downloads/solved_case_sc0.m"
     )
+    # slack_bus = [b.bus_i for b in mpc.bus if b.bus_type == 3]ß
+    for gen in mpc.gen:
+        gen.pg = 0
+    #     if gen.gen_bus in slack_bus:
+    #         gen.pmax = 10000
+    #         gen.pmin = 0
+    #         gen.qmax = 10000
+    #         gen.qmin = -10000
+    for bus in mpc.bus:
+        bus.vmax = 2.0
+        bus.vmin = 0.0
+        bus.pd = 0
+    # for br in mpc.branch:
+    #     br.br_r = 0
+    #     br.br_x = 0.01
+    #     br.br_b = 0.0
+    # pass
+
+    # for br in mpc.branch:
+    #     if br.br_status > 0:
+    #         if 0 <= abs(br.br_x) < 1e-4:
+    #             br.br_x = 5e-4 if br.br_x >= 0 else -5e-4
+    #         if br.br_r < 0:
+    #             br.br_r = 0.0
+
+    # import networkx as nx
+
+    # Build connectivity graph of active elements
+    # G = nx.Graph()
+    # for b in mpc.bus:
+    #     if b.bus_type != 4:
+    #         G.add_node(b.bus_i)
+    # for br in mpc.branch:
+    #     if br.br_status > 0 and br.f_bus in G and br.t_bus in G:
+    #         G.add_edge(br.f_bus, br.t_bus)
+    # slack_buses = set(b.bus_i for b in mpc.bus if b.bus_type == 3)
+    # components = list(nx.connected_components(G))
+    # # Keep only buses in components that contain a slack bus
+    # valid_buses = set()
+    # for comp in components:
+    #     if any(sb in comp for sb in slack_buses):
+    #         valid_buses.update(comp)
+    # # Deactivate buses and branches outside valid components
+    # for b in mpc.bus:
+    #     if b.bus_i not in valid_buses:
+    #         b.bus_type = 4  # Mark as isolated
+    # for br in mpc.branch:
+    #     if br.f_bus not in valid_buses or br.t_bus not in valid_buses:
+    #         br.br_status = 0
+    # for g in mpc.gen:
+    #     if g.gen_bus not in valid_buses:
+    #         g.gen_status = 0
 
     mpc = set_gen_bus_to_pv(mpc)
     id_to_bus = build_bus_energy_balances(mpc)
     bus_del_to_keep = find_low_x_branches(mpc, id_to_bus, x_threshold=0.001)
     mpc = open_branch_connect_to_del_buses(mpc, bus_del_to_keep)
     mpc = replace_bus_ids(mpc, bus_del_to_keep)
+    mpc = open_branch_from_to_same_bus(mpc)
 
     # bus_del_to_keep = find_starbus_low_x(mpc)
     # mpc = open_branch_connect_to_del_buses(mpc, bus_del_to_keep)
@@ -1575,6 +1672,9 @@ if __name__ == "__main__":
     )
     print_branch_large_flows(id_to_bus, mpc, top_n=10)
 
+    # from scipy.io import savemat
+    # mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
+
     # Verify dictionary export with numpy matrices
     d = mpc.to_dict()
     print("\nMATPOWER dictionary matrix shapes:")
@@ -1590,10 +1690,11 @@ if __name__ == "__main__":
     ppopt = ppoption(
         MODEL="AC",  # AC power flow model
         PF_ALG=1,  # 1 = Newton-Raphson ('NR')
-        PF_TOL=1e-8,  # Convergence tolerance
-        PF_MAX_IT=1,  # Maximum iteration limit
+        PF_TOL=1e-3,  # Convergence tolerance
+        PF_MAX_IT=20,  # Maximum iteration limit
         ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
-        VERBOSE=0,  # 2 = Print detailed progress
+        OUT_ALL=0,  # Do not print bus/branch/gen result tables
+        VERBOSE=1,  # Print solver progress info
     )
     results, success = runpf(ppc, ppopt)
-    print(f"\nPower flow converged: {bool(success)}")
+    print(f"\nAC Power flow converged: {bool(success)}")
