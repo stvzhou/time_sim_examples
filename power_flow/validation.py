@@ -276,36 +276,31 @@ def calc_flow_into_branch(
     Returns:
         Flow(p, q) in MW and MVAr leaving the 'from' bus into the branch.
     """
-    if abs(r) < 0.0001 and abs(x) < 0.0001:
-        return Flow(np.deg2rad(vsa - vra) * base_mva, 0)
+    if r**2 + x**2 == 0:
+        return Flow(0, 0)
 
     a1 = np.deg2rad(shift)
     g = g_total / 2.0
     b = b_total / 2.0
-    y = 1 / np.sqrt(r**2 + x**2)
-    ksi = np.arctan2(x, r)
-    theta = ksi - a1 - np.deg2rad(vsa) + np.deg2rad(vra)
+    gkm = r / (r**2 + x**2)
+    bkm = -x / (r**2 + x**2)
+    theta = np.deg2rad(vsa) - np.deg2rad(vra) + a1
+    if ratio == 0:
+        ratio = 1
+    ratio = 1 / ratio
 
     # Active power flow into branch at from bus
     ps = (
-        ratio
-        * vsm
-        * (
-            g * ratio * vsm
-            + y * ratio * vsm * np.sin(ksi)
-            - y * ratio * vrm * np.sin(theta)
-        )
+        (ratio * vsm) ** 2 * gkm
+        - ratio * vsm * vrm * gkm * np.cos(theta)
+        - ratio * vsm * vrm * bkm * np.sin(theta)
     )
 
     # Reactive power flow into branch at from bus
     qs = (
-        ratio
-        * vsm
-        * (
-            -b * ratio * vsm
-            + y * ratio * vsm * np.cos(ksi)
-            - y * ratio * vrm * np.cos(theta)
-        )
+        -((ratio * vsm) ** 2) * (bkm + b)
+        + ratio * vsm * vrm * bkm * np.cos(theta)
+        - ratio * vsm * vrm * gkm * np.sin(theta)
     )
 
     return Flow(float(ps * base_mva), float(qs * base_mva))
@@ -340,72 +335,33 @@ def calc_flow_from_branch(
     Returns:
         Flow(p, q) in MW and MVAr entering the 'to' bus from the branch.
     """
-    if abs(r) < 0.0001 and abs(x) < 0.0001:
-        return Flow(np.deg2rad(vsa - vra) * base_mva, 0)
+    if r**2 + x**2 == 0:
+        return Flow(0, 0)
 
-    a2 = -np.deg2rad(shift)
+    a1 = np.deg2rad(shift)
     g = g_total / 2.0
     b = b_total / 2.0
-    y = 1 / np.sqrt(r**2 + x**2)
-    ksi = np.arctan2(x, r)
-    theta = ksi - a2 - np.deg2rad(vra) + np.deg2rad(vsa)
+    gkm = r / (r**2 + x**2)
+    bkm = -x / (r**2 + x**2)
+    theta = np.deg2rad(vsa) - np.deg2rad(vra) + a1
+    if ratio == 0:
+        ratio = 1
     ratio = 1 / ratio
 
-    # Active power flow entering receiving bus from branch
-    pr = (
-        ratio
-        * vrm
-        * (
-            g * ratio * vrm
-            + y * ratio * vrm * np.sin(ksi)
-            - y * ratio * vsm * np.sin(theta)
-        )
+    pr = -(
+        (ratio * vsm) ** 2 * gkm
+        - ratio * vsm * vrm * gkm * np.cos(theta)
+        + ratio * vsm * vrm * bkm * np.sin(theta)
     )
 
     # Reactive power flow into branch at from bus
     qr = (
-        ratio
-        * vrm
-        * (
-            -b * ratio * vrm
-            + y * ratio * vrm * np.cos(ksi)
-            - y * ratio * vsm * np.cos(theta)
-        )
+        -((ratio * vsm) ** 2) * (bkm + b)
+        + ratio * vsm * vrm * bkm * np.cos(theta)
+        + ratio * vsm * vrm * gkm * np.sin(theta)
     )
 
     return Flow(float(pr * base_mva), float(qr * base_mva))
-
-
-def calc_flow_into_line(
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    r: float,
-    x: float,
-    b: float,
-    base_mva: float = 100.0,
-) -> Flow:
-    """Calculate flow into a transmission line at the sending bus (psbl.py compatibility)."""
-    return calc_flow_into_branch(
-        vsm, vrm, vsa, vra, r, x, b, tap=0.0, shift=0.0, base_mva=base_mva
-    )
-
-
-def calc_flow_from_line(
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    r: float,
-    x: float,
-    b: float,
-    base_mva: float = 100.0,
-) -> Flow:
-    """Calculate flow from a transmission line at the receiving bus (psbl.py compatibility)."""
-    return calc_flow_from_branch(
-        vsm, vrm, vsa, vra, r, x, b, shift=0.0, base_mva=base_mva
-    )
 
 
 # =============================================================================
@@ -698,24 +654,14 @@ def get_branch_flows(
         Updated id_to_bus dictionary with outgoing and incoming branch flows.
     """
     base_mva, _, _, branch_data = _get_case_components(case)
-
-    if isinstance(branch_data, np.ndarray):
-        for idx in range(branch_data.shape[0]):
-            row = branch_data[idx]
-            status = int(row[10]) if len(row) > 10 else 1
-            if status <= 0:
+    for idx, br in enumerate(branch_data):
+        if hasattr(br, "f_bus"):
+            if not br.is_in_service:
                 continue
-
-            fb = int(row[F_BUS])
-            tb = int(row[T_BUS])
+            fb = br.f_bus
+            tb = br.t_bus
             if fb not in id_to_bus or tb not in id_to_bus:
                 continue
-
-            r = float(row[2])
-            x = float(row[3])
-            b = float(row[4])
-            tap = float(row[TAP]) if len(row) > TAP else 0.0
-            shift = float(row[SHIFT]) if len(row) > SHIFT else 0.0
 
             vsm = id_to_bus[fb].vm
             vsa = id_to_bus[fb].va
@@ -723,86 +669,32 @@ def get_branch_flows(
             vra = id_to_bus[tb].va
 
             flow_into = calc_flow_into_branch(
-                vsm, vrm, vsa, vra, r, x, b, shift, base_mva
+                vsm=vsm,
+                vrm=vrm,
+                vsa=vsa,
+                vra=vra,
+                r=br.br_r,
+                x=br.br_x,
+                b_total=br.br_b,
+                shift=br.shift,
+                base_mva=base_mva,
+                ratio=br.tap,
             )
             flow_from = calc_flow_from_branch(
-                vsm, vrm, vsa, vra, r, x, b, shift, base_mva
+                vsm=vsm,
+                vrm=vrm,
+                vsa=vsa,
+                vra=vra,
+                r=br.br_r,
+                x=br.br_x,
+                b_total=br.br_b,
+                shift=br.shift,
+                base_mva=base_mva,
+                ratio=br.tap,
             )
 
             id_to_bus[fb].outgoing_flows[f"br_{idx}"] = flow_into
             id_to_bus[tb].incoming_flows[f"br_{idx}"] = flow_from
-
-    else:
-        for idx, br in enumerate(branch_data):
-            if hasattr(br, "f_bus"):
-                if not br.is_in_service:
-                    continue
-                fb = br.f_bus
-                tb = br.t_bus
-                if fb not in id_to_bus or tb not in id_to_bus:
-                    continue
-
-                vsm = id_to_bus[fb].vm
-                vsa = id_to_bus[fb].va
-                vrm = id_to_bus[tb].vm
-                vra = id_to_bus[tb].va
-
-                flow_into = calc_flow_into_branch(
-                    vsm,
-                    vrm,
-                    vsa,
-                    vra,
-                    br.br_r,
-                    br.br_x,
-                    br.br_b,
-                    br.shift,
-                    base_mva,
-                )
-                flow_from = calc_flow_from_branch(
-                    vsm,
-                    vrm,
-                    vsa,
-                    vra,
-                    br.br_r,
-                    br.br_x,
-                    br.br_b,
-                    br.shift,
-                    base_mva,
-                )
-
-                id_to_bus[fb].outgoing_flows[f"br_{idx}"] = flow_into
-                id_to_bus[tb].incoming_flows[f"br_{idx}"] = flow_from
-
-            elif isinstance(br, (list, tuple)):
-                status = int(br[10]) if len(br) > 10 else 1
-                if status <= 0:
-                    continue
-
-                fb = int(br[F_BUS])
-                tb = int(br[T_BUS])
-                if fb not in id_to_bus or tb not in id_to_bus:
-                    continue
-
-                r = float(br[2])
-                x = float(br[3])
-                b = float(br[4])
-                tap = float(br[TAP]) if len(br) > TAP else 0.0
-                shift = float(br[SHIFT]) if len(br) > SHIFT else 0.0
-
-                vsm = id_to_bus[fb].vm
-                vsa = id_to_bus[fb].va
-                vrm = id_to_bus[tb].vm
-                vra = id_to_bus[tb].va
-
-                flow_into = calc_flow_into_branch(
-                    vsm, vrm, vsa, vra, r, x, b, shift, base_mva
-                )
-                flow_from = calc_flow_from_branch(
-                    vsm, vrm, vsa, vra, r, x, b, shift, base_mva
-                )
-
-                id_to_bus[fb].outgoing_flows[f"br_{idx}"] = flow_into
-                id_to_bus[tb].incoming_flows[f"br_{idx}"] = flow_from
 
     return id_to_bus
 
@@ -1293,15 +1185,15 @@ def print_branch_large_flows(
     branches = {}
     for bus in id_to_bus.values():
         for br, flow in bus.incoming_flows.items():
-            branches[br] = abs(flow.p)
+            branches[br] = flow.p
         for br, flow in bus.outgoing_flows.items():
-            branches[br] = abs(flow.p)
+            branches[br] = flow.p
     branches = dict(sorted(branches.items(), key=lambda x: x[1], reverse=True))
     print("\n" + "=" * 120)
     print(f"{'TOP BRANCHES WITH LARGEST POWER FLOWS':^80}")
     print("=" * 120)
     print(
-        f"{'From Bus':>10} | {'To Bus':>10} | {'R':>10} | {'X':>10} | {'P Flow (MW)':>16} | {'From Va':>10} | {'To Va':>10} | {'Rate A (MW)':>10} | {'Shift (deg)':>10} | {'Ratio':>10}"
+        f"{'From Bus':>10} | {'To Bus':>10} | {'R':>10} | {'X':>10} | {'P Flow (MW)':>16} | {'From Va':>10} | {'To Va':>10} | {'Rate A (MW)':>10} | {'Shift (deg)':>10} | {'Ratio':>10} | {'Flow P':>10}"
     )
     print("-" * 120)
     bus_id_to_bus = {b.bus_i: b for b in mpc.bus}
@@ -1314,9 +1206,10 @@ def print_branch_large_flows(
         ratea = mpc.branch[br_idx].rate_a
         shift = mpc.branch[br_idx].shift
         ratio = mpc.branch[br_idx].tap
+        flow_p = mpc.branch[br_idx].flow_p
 
         print(
-            f"{f_bus:10} | {t_bus:10} | {r:10.4f} | {x:10.6f} | {flow:>16.4f} | {bus_id_to_bus[f_bus].va:10.5f} | {bus_id_to_bus[t_bus].va:10.5f} | {ratea:10.4f} | {shift:10.4f} | {ratio:10.4f}"
+            f"{f_bus:10} | {t_bus:10} | {r:10.4f} | {x:10.6f} | {flow:>16.4f} | {bus_id_to_bus[f_bus].va:10.5f} | {bus_id_to_bus[t_bus].va:10.5f} | {ratea:10.4f} | {shift:10.4f} | {ratio:10.4f} |{flow_p:10.4f}"
         )
     print("=" * 120 + "\n")
 
@@ -1489,14 +1382,14 @@ def is_buses_short_circuited(bus1: BusEnergyBalance, bus2: BusEnergyBalance):
 def find_low_x_branches(
     mpc: MatpowerCase,
     id_to_bus: Dict[int, BusEnergyBalance],
-    x_threshold: float = 0.001,
+    x_threshold: float = 0.0005,
 ) -> Dict[int, int]:
     g = nx.Graph()
     for br in mpc.branch:
-        if br.br_r == 0:
-            g.add_edge(br.f_bus, br.t_bus)
-            continue
-        if abs(br.br_x) > x_threshold:
+        # if abs(br.br_r) < x_threshold:
+        #     g.add_edge(br.f_bus, br.t_bus)
+        #     continue
+        if np.sqrt(abs(br.br_x) ** 2 + abs(br.br_r) ** 2) > x_threshold:
             continue
         # if not is_buses_short_circuited(id_to_bus[br.f_bus], id_to_bus[br.t_bus]):
         #     continue
@@ -1592,65 +1485,27 @@ if __name__ == "__main__":
     # mpc = MatpowerCase.from_mat(
     #     "/usr/local/google/home/sxzhou/Downloads/2024Series2029SUM.mat"
     # )
-    mpc = MatpowerCase.from_m(
-        "/usr/local/google/home/sxzhou/Downloads/solved_case_sc0.m"
-    )
-    # slack_bus = [b.bus_i for b in mpc.bus if b.bus_type == 3]ß
+    tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
+    mpc = MatpowerCase.from_tara(tara_file_dir)
+    mpc = mpc.extract_main_island()
+    slack_buses = [b.bus_i for b in mpc.bus if b.bus_type == 3]
     for gen in mpc.gen:
-        gen.pg = 0
-    #     if gen.gen_bus in slack_bus:
-    #         gen.pmax = 10000
-    #         gen.pmin = 0
-    #         gen.qmax = 10000
-    #         gen.qmin = -10000
-    for bus in mpc.bus:
-        bus.vmax = 2.0
-        bus.vmin = 0.0
-        bus.pd = 0
+        if gen.gen_bus in slack_buses:
+            gen.pmax = 10000
+            gen.pmin = -10000
+            gen.qmax = 10000
+            gen.qmin = -10000
+    # for bus in mpc.bus:
+    #     bus.vmax = 2.0
+    #     bus.vmin = 0.0
+    #     bus.pd = 0
     # for br in mpc.branch:
-    #     br.br_r = 0
-    #     br.br_x = 0.01
-    #     br.br_b = 0.0
+    #     if br.shift != 0:
+    #         br.br_status = 0
     # pass
 
-    # for br in mpc.branch:
-    #     if br.br_status > 0:
-    #         if 0 <= abs(br.br_x) < 1e-4:
-    #             br.br_x = 5e-4 if br.br_x >= 0 else -5e-4
-    #         if br.br_r < 0:
-    #             br.br_r = 0.0
-
-    # import networkx as nx
-
-    # Build connectivity graph of active elements
-    # G = nx.Graph()
-    # for b in mpc.bus:
-    #     if b.bus_type != 4:
-    #         G.add_node(b.bus_i)
-    # for br in mpc.branch:
-    #     if br.br_status > 0 and br.f_bus in G and br.t_bus in G:
-    #         G.add_edge(br.f_bus, br.t_bus)
-    # slack_buses = set(b.bus_i for b in mpc.bus if b.bus_type == 3)
-    # components = list(nx.connected_components(G))
-    # # Keep only buses in components that contain a slack bus
-    # valid_buses = set()
-    # for comp in components:
-    #     if any(sb in comp for sb in slack_buses):
-    #         valid_buses.update(comp)
-    # # Deactivate buses and branches outside valid components
-    # for b in mpc.bus:
-    #     if b.bus_i not in valid_buses:
-    #         b.bus_type = 4  # Mark as isolated
-    # for br in mpc.branch:
-    #     if br.f_bus not in valid_buses or br.t_bus not in valid_buses:
-    #         br.br_status = 0
-    # for g in mpc.gen:
-    #     if g.gen_bus not in valid_buses:
-    #         g.gen_status = 0
-
-    mpc = set_gen_bus_to_pv(mpc)
     id_to_bus = build_bus_energy_balances(mpc)
-    bus_del_to_keep = find_low_x_branches(mpc, id_to_bus, x_threshold=0.001)
+    bus_del_to_keep = find_low_x_branches(mpc, id_to_bus)
     mpc = open_branch_connect_to_del_buses(mpc, bus_del_to_keep)
     mpc = replace_bus_ids(mpc, bus_del_to_keep)
     mpc = open_branch_from_to_same_bus(mpc)
@@ -1672,8 +1527,9 @@ if __name__ == "__main__":
     )
     print_branch_large_flows(id_to_bus, mpc, top_n=10)
 
-    # from scipy.io import savemat
-    # mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
+    from scipy.io import savemat
+
+    mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
 
     # Verify dictionary export with numpy matrices
     d = mpc.to_dict()
@@ -1690,11 +1546,12 @@ if __name__ == "__main__":
     ppopt = ppoption(
         MODEL="AC",  # AC power flow model
         PF_ALG=1,  # 1 = Newton-Raphson ('NR')
-        PF_TOL=1e-3,  # Convergence tolerance
-        PF_MAX_IT=20,  # Maximum iteration limit
+        PF_TOL=1e-2,  # Convergence tolerance
+        PF_MAX_IT=30,  # Maximum iteration limit
         ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
         OUT_ALL=0,  # Do not print bus/branch/gen result tables
         VERBOSE=1,  # Print solver progress info
+        CURRENT_BALANCE=0,
     )
     results, success = runpf(ppc, ppopt)
     print(f"\nAC Power flow converged: {bool(success)}")

@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
+import pandas as pd
+import networkx as nx
 
 # Ensure power_flow directory is in python path
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -418,6 +420,10 @@ class Branch:
     br_status: int = 1  # 1=in-service, 0=out-of-service
     angmin: float = -360.0  # degrees
     angmax: float = 360.0  # degrees
+    flow_p: float = 0.0
+    flow_q: float = 0.0
+    loss_p: float = 0.0
+    loss_q: float = 0.0
     pf: Optional[float] = None
     qf: Optional[float] = None
     pt: Optional[float] = None
@@ -1192,13 +1198,115 @@ class MatpowerCase:
             star_buses=star_buses,
         )
 
+    @classmethod
+    def from_tara(cls, file_dir=str) -> MatpowerCase:
+        base_mva = 100.0
+        bus = pd.read_csv(os.path.join(file_dir, "BusData.csv"), skiprows=9)
+        load = pd.read_csv(os.path.join(file_dir, "LoadData.csv"), skiprows=9)
+        gen = pd.read_csv(os.path.join(file_dir, "GenData.csv"), skiprows=9)
+        branch = pd.read_csv(os.path.join(file_dir, "BranchData.csv"), skiprows=9)
+        bus.columns = bus.columns.str.strip()
+        load.columns = load.columns.str.strip()
+        gen.columns = gen.columns.str.strip()
+        branch.columns = branch.columns.str.strip()
+
+        load = load[load["St"] == 1]
+        load["P"] = load["Pconst"] + load["Pcurrt"] + load["PAdmit"]
+        load["Q"] = load["Qconst"] + load["Qcurrt"] + load["QAdmit"]
+        bus_p = load.groupby("Bus#")["P"].sum().to_dict()
+        bus_q = load.groupby("Bus#")["Q"].sum().to_dict()
+
+        hvdc_p = {}
+        hvdc_q = {}
+        for _, b in branch.iterrows():
+            if pd.isna(b["X"]) and int(b["St"]) == 1:
+                hvdc_p[b["Fr Bus"]] = b["MW_Flow"] + b["LossesMW"]
+                hvdc_q[b["Fr Bus"]] = b["MVAr_flow"]
+                hvdc_p[b["To Bus"]] = -b["MW_Flow"]
+                hvdc_q[b["To Bus"]] = -b["MVAr_flow"]
+
+        mat_buses: List[Bus] = []
+        for _, b in bus.iterrows():
+            bs = b["BShntOn"]
+            if b["BTyp"] == "LOAD":
+                bs += -b["QGen"]
+            mat_buses.append(
+                Bus(
+                    bus_i=b["Bus#"],
+                    bus_type=b["CodeBTyp"],
+                    pd=bus_p.get(b["Bus#"], 0) + hvdc_p.get(b["Bus#"], 0),
+                    qd=bus_q.get(b["Bus#"], 0) + hvdc_q.get(b["Bus#"], 0),
+                    gs=b["GShntOn"],
+                    bs=bs,
+                    bus_area=b["Area"],
+                    vm=b["Vmag [PU]"],
+                    va=b["Vangle"],
+                    base_kv=b["Volt"],
+                    zone=b["Zone"],
+                    vmax=1.5,
+                    vmin=0.5,
+                )
+            )
+
+        mat_gens: List[Generator] = []
+        for _, g in gen.iterrows():
+            mat_gens.append(
+                Generator(
+                    gen_bus=g["Bus#"],
+                    pg=g["POn"],
+                    qg=g["QGen"],
+                    qmax=g["Qmax"],
+                    qmin=g["Qmin"],
+                    vg=g["VoltTarg"],
+                    mbase=base_mva,
+                    gen_status=g["Sta"],
+                    pmax=g["Pmax"],
+                    pmin=g["Pmin"],
+                )
+            )
+
+        mat_branches = []
+        for _, b in branch.iterrows():
+            if pd.isna(b["X"]):
+                # HVDC
+                continue
+            mat_branches.append(
+                Branch(
+                    f_bus=b["Fr Bus"],
+                    t_bus=b["To Bus"],
+                    br_r=float(b["R"]),
+                    br_x=float(b["X"]),
+                    br_b=float(b["ShuntBFrom"]) + float(b["ShuntBTo"]),
+                    rate_a=float(b["RateA"]),
+                    rate_b=float(b["RateB"]),
+                    rate_c=float(b["RateC"]),
+                    tap=float(b["TranRat"]),
+                    shift=-float(b["PhsShftDeg"]),
+                    br_status=int(b["St"]),
+                    flow_p=float(b["MW_Flow"]),
+                    flow_q=float(b["MVAr_flow"]),
+                    loss_p=float(b["LossesMW"]),
+                    loss_q=float(b["LossesMVAr"]),
+                )
+            )
+
+        return cls(
+            version="2",
+            baseMVA=base_mva,
+            bus=[b for b in mat_buses if b.bus_type != 4],
+            gen=[g for g in mat_gens if g.gen_status == 1],
+            branch=[b for b in mat_branches if b.br_status == 1],
+        )
+
     def summary(self) -> Dict[str, Any]:
         """Summarize MATPOWER case statistics."""
         total_p_gen = sum(g.pg for g in self.gen if g.is_in_service)
         total_q_gen = sum(g.qg for g in self.gen if g.is_in_service)
-        total_p_load = sum(b.pd for b in self.bus if b.is_in_service)
+        total_p_load = sum(b.pd - b.gs for b in self.bus if b.is_in_service)
         total_q_load = sum(b.qd for b in self.bus if b.is_in_service)
         total_shunts = sum(b.bs for b in self.bus if b.is_in_service)
+        total_p_loss = sum(b.loss_p for b in self.branch)
+        total_q_loss = sum(b.loss_q for b in self.branch)
 
         num_slack = sum(1 for b in self.bus if b.is_slack)
         num_pv = sum(1 for b in self.bus if b.is_pv)
@@ -1217,12 +1325,41 @@ class MatpowerCase:
             "branches_total": len(self.branch),
             "transmission_lines": num_lines,
             "transformers": num_trans,
-            "total_gen_mw": round(total_p_gen, 2),
-            "total_load_mw": round(total_p_load, 2),
-            "shunts_mvar": round(total_shunts, 2),
-            "total_gen_mvar": round(total_q_gen, 2),
-            "total_load_mvar": round(total_q_load, 2),
+            "total_gen_p": round(total_p_gen, 2),
+            "total_load_p": round(total_p_load, 2),
+            "total_loss_p": round(total_p_loss, 2),
+            "balance_p": round(total_p_gen - total_p_load - total_p_loss, 2),
+            "total_shunts_q": round(total_shunts, 2),
+            "total_gen_q": round(total_q_gen, 2),
+            "total_load_q": round(total_q_load, 2),
+            "total_loss_q": round(total_q_loss, 2),
+            "balance_q": round(
+                total_q_gen - total_q_load + total_shunts - total_q_loss, 2
+            ),
         }
+
+    def extract_main_island(self) -> MatpowerCase:
+        G = nx.Graph()
+        for b in self.bus:
+            if b.bus_type != 4:
+                G.add_node(b.bus_i)
+        for br in self.branch:
+            if br.br_status > 0 and br.f_bus in G and br.t_bus in G:
+                G.add_edge(br.f_bus, br.t_bus)
+        slack_buses = set(b.bus_i for b in self.bus if b.bus_type == 3)
+        components = list(nx.connected_components(G))
+        main_island = components[0]
+        return MatpowerCase(
+            version="2",
+            baseMVA=self.baseMVA,
+            bus=[b for b in self.bus if b.bus_i in main_island],
+            gen=[g for g in self.gen if g.gen_bus in main_island],
+            branch=[
+                br
+                for br in self.branch
+                if br.f_bus in main_island and br.t_bus in main_island
+            ],
+        )
 
 
 # =============================================================================
@@ -1233,59 +1370,16 @@ if __name__ == "__main__":
     import os
     import sys
 
-    raw_file = (
-        "/usr/local/google/home/sxzhou/Downloads/2025 Series RTEP 2030 SUM_06182025.raw"
+    tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
+    mpc = MatpowerCase.from_tara(tara_file_dir)
+    for key, val in mpc.summary().items():
+        print(f"{key}: {val}")
+
+    print("\nExtracting main island...")
+    main_island = mpc.extract_main_island()
+    print(
+        "Main island slack buses: ",
+        [b.bus_i for b in main_island.bus if b.bus_type == 3],
     )
-
-    print(f"1. Parsing RAW file: {raw_file}")
-    raw_data = parse_raw(raw_file)
-
-    print("2. Converting to MATPOWER 5.0 Case...")
-    mpc = MatpowerCase.from_psse(raw_data)
-
-    print("\nMATPOWER Case Summary:")
-    for k, v in mpc.summary().items():
-        print(f"  {k:25s}: {v}")
-
-    print("\nFirst 3 Buses (MATPOWER format):")
-    for b in mpc.bus[:3]:
-        print(
-            f"  Bus {b.bus_i}: type={b.bus_type}, Pd={b.pd} MW, Qd={b.qd} MVAr, Vm={b.vm:.3f} pu, Va={b.va:.2f} deg, baseKV={b.base_kv} kV"
-        )
-
-    print("\nFirst 3 Generators (MATPOWER format):")
-    for g in mpc.gen[:3]:
-        print(
-            f"  Gen at Bus {g.gen_bus}: Pg={g.pg} MW, Qg={g.qg} MVAr, Qmax={g.qmax}, Qmin={g.qmin}, Vg={g.vg} pu, status={g.gen_status}"
-        )
-
-    print("\nFirst 3 Branches (MATPOWER format):")
-    for br in mpc.branch[:3]:
-        br_type = "Transformer" if br.is_transformer else "Line"
-        print(
-            f"  {br_type} {br.f_bus} -> {br.t_bus}: r={br.br_r:.4f}, x={br.br_x:.4f}, b={br.br_b:.4f}, tap={br.tap}, shift={br.shift} deg, status={br.br_status}"
-        )
-
-    # Verify dictionary export with numpy matrices
-    d = mpc.to_dict()
-    print("\nMATPOWER dictionary matrix shapes:")
-    print(f"  bus matrix:    {d['bus'].shape}")
-    print(f"  gen matrix:    {d['gen'].shape}")
-    print(f"  branch matrix: {d['branch'].shape}")
-
-    # from pypower.api import runpf
-    # from pypower.ppoption import ppoption
-
-    # ppc = mpc.to_dict()
-
-    # ppopt = ppoption(
-    #     MODEL="AC",  # AC power flow model
-    #     PF_ALG=1,  # 1 = Newton-Raphson ('NR')
-    #     PF_TOL=1e-8,  # Convergence tolerance
-    #     PF_MAX_IT=10,  # Maximum iteration limit
-    #     ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
-    #     VERBOSE=2,  # 2 = Print detailed progress
-    #     OUT_ALL=1,  # 1 = Print all output sections
-    # )
-    # results, success = runpf(ppc, ppopt)
-    # print(f"\nPower flow converged: {bool(success)}")
+    for key, val in main_island.summary().items():
+        print(f"{key}: {val}")
