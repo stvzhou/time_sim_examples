@@ -1,8 +1,187 @@
 import numpy as np
-from validation import calc_flow_from_branch, calc_flow_into_branch
+from enum import Enum
+import math
+from dataclasses import dataclass
 
 
-def calculate_rx_by_pq_from_line(
+class Model(Enum):
+    MATPOWER = "MATPOWER"
+    TARA = "TARA"
+
+
+@dataclass
+class Flow:
+    """Active (P) and Reactive (Q) power flow representation.
+
+    Attributes:
+        p: Active power (MW)
+        q: Reactive power (MVAr)
+    """
+
+    p: float = 0.0
+    q: float = 0.0
+
+    # @property
+    # def s(self) -> float:
+    #     """Apparent power magnitude (MVA) S = sqrt(P^2 + Q^2)."""
+    #     return math.sqrt(self.p**2 + self.q**2)
+
+    # def __add__(self, other: Flow) -> Flow:
+    #     return Flow(self.p + other.p, self.q + other.q)
+
+    # def __sub__(self, other: Flow) -> Flow:
+    #     return Flow(self.p - other.p, self.q - other.q)
+
+    # def __neg__(self) -> Flow:
+    #     return Flow(-self.p, -self.q)
+
+    # def is_zero(self, tol: float = 1e-8) -> bool:
+    #     """Return True if both P and Q are within tolerance of zero."""
+    #     return abs(self.p) <= tol and abs(self.q) <= tol
+
+    # def to_tuple(self) -> Tuple[float, float]:
+    #     """Return (p, q) tuple."""
+    #     return (self.p, self.q)
+
+    # def to_dict(self) -> Dict[str, float]:
+    #     """Return dictionary representation."""
+    #     return {"p": self.p, "q": self.q, "s": self.s}
+
+
+def calc_flow_into_branch(
+    vsm: float,
+    vrm: float,
+    vsa: float,
+    vra: float,
+    r: float,
+    x: float,
+    b_total: float = 0.0,
+    shift: float = 0.0,
+    ratio: float = 1.0,
+    gfrom: float = 0,
+    bfrom: float = 0,
+    gto: float = 0,
+    bto: float = 0,
+    base_mva: float = 100.0,
+) -> Flow:
+    """Calculate active and reactive power flow INTO a branch at the 'from' bus.
+    https://powsybl.readthedocs.io/projects/powsybl-open-loadflow/en/latest/loadflow/loadflow.html
+
+    Supports transmission lines and transformers with off-nominal tap ratio
+    and phase shift angle (tap is placed at the 'from' bus side as in MATPOWER).
+
+    Args:
+        vsm: Voltage magnitude at 'from' (sending) bus (p.u.)
+        vrm: Voltage magnitude at 'to' (receiving) bus (p.u.)
+        vsa: Voltage angle at 'from' bus (degrees)
+        vra: Voltage angle at 'to' bus (degrees)
+        r: Series resistance (p.u.)
+        x: Series reactance (p.u.)
+        b: Total branch charging susceptance (p.u.)
+        shift: Transformer phase shift angle (degrees, positive = delay)
+        base_mva: System base MVA (default: 100.0)
+
+    Returns:
+        Flow(p, q) in MW and MVAr leaving the 'from' bus into the branch.
+    """
+    if r**2 + x**2 == 0:
+        return Flow(0, 0)
+
+    a1 = np.deg2rad(shift)
+    b = b_total / 2.0
+    gkm = r / (r**2 + x**2)
+    bkm = -x / (r**2 + x**2)
+    theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
+    if ratio == 0:
+        ratio = 1
+    vsm = vsm / ratio
+
+    # Active power flow into branch at from bus
+    ps = (
+        vsm**2 * gkm - vsm * vrm * gkm * np.cos(theta) - vsm * vrm * bkm * np.sin(theta)
+    )
+
+    # Reactive power flow into branch at from bus
+    qs = (
+        -(vsm**2) * (bkm + b)
+        + vsm * vrm * bkm * np.cos(theta)
+        - vsm * vrm * gkm * np.sin(theta)
+    )
+
+    vsm = vsm * ratio
+    ps += gfrom * vsm * vsm
+    qs -= bfrom * vsm * vsm
+
+    return Flow(float(ps * base_mva), float(qs * base_mva))
+
+
+def calc_flow_from_branch(
+    vsm: float,
+    vrm: float,
+    vsa: float,
+    vra: float,
+    r: float,
+    x: float,
+    b_total: float = 0.0,
+    shift: float = 0.0,
+    ratio: float = 1.0,
+    gfrom: float = 0,
+    bfrom: float = 0,
+    gto: float = 0,
+    bto: float = 0,
+    base_mva: float = 100.0,
+    model: Model = Model.MATPOWER,
+) -> Flow:
+    """Calculate active and reactive power flow entering the 'to' bus FROM the branch.
+
+    Args:
+        vsm: Voltage magnitude at 'from' (sending) bus (p.u.)
+        vrm: Voltage magnitude at 'to' (receiving) bus (p.u.)
+        vsa: Voltage angle at 'from' bus (degrees)
+        vra: Voltage angle at 'to' bus (degrees)
+        r: Series resistance (p.u.)
+        x: Series reactance (p.u.)
+        b: Total branch charging susceptance (p.u.)
+        shift: Transformer phase shift angle (degrees, positive = delay)
+        base_mva: System base MVA (default: 100.0)
+
+    Returns:
+        Flow(p, q) in MW and MVAr entering the 'to' bus from the branch.
+    """
+    if r**2 + x**2 == 0:
+        return Flow(0, 0)
+
+    a1 = np.deg2rad(shift)
+    b = b_total / 2.0
+    gkm = r / (r**2 + x**2)
+    bkm = -x / (r**2 + x**2)
+
+    # Angle difference from sending to receiving end
+    theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
+
+    if ratio == 0:
+        ratio = 1
+
+    # ratio on from or to bus will lead to significant power flow difference, MATPOWER only support ratio on from bus
+    original_vrm = vrm
+    if model == Model.TARA:
+        vrm = vrm * ratio
+    elif model == Model.MATPOWER:
+        vsm = vsm / ratio
+
+    # Active power flow injected at receiving bus from line
+    pr = (vrm**2) * gkm - vsm * vrm * (gkm * np.cos(theta) - bkm * np.sin(theta))
+
+    # Reactive power flow injected at receiving bus from line
+    qr = -(vrm**2) * (bkm + b) + vsm * vrm * (bkm * np.cos(theta) + gkm * np.sin(theta))
+
+    pr -= gto * (original_vrm**2)
+    qr -= bto * (original_vrm**2)
+
+    return Flow(float(pr * base_mva), float(qr * base_mva))
+
+
+def calculate_rx_by_pq_from_branch(
     pr: float,
     qr: float,
     vsm: float,
@@ -17,6 +196,7 @@ def calculate_rx_by_pq_from_line(
     bto: float = 0,
     shift: float = 0,
     sbase: float = 100,
+    model: Model = Model.MATPOWER,
 ):
     """
     Calculates r and x fromreceiving end power flows.
@@ -35,11 +215,14 @@ def calculate_rx_by_pq_from_line(
     qr += bto * vrm * vrm
 
     b = b / 2
-    theta = np.radians(vsa - vra)
+    theta = np.radians(vsa - vra - shift)
     cos_t = np.cos(theta)
     sin_t = np.sin(theta)
 
-    vrm = vrm * ratio
+    if model == Model.TARA:
+        vrm = vrm * ratio
+    elif model == Model.MATPOWER:
+        vsm = vsm / ratio
 
     A_coeff = -vsm * vrm * cos_t + vrm**2
     B_coeff = vsm * vrm * sin_t
@@ -61,7 +244,7 @@ def calculate_rx_by_pq_from_line(
     return r, x
 
 
-def calculate_rx_by_pq_into_line(
+def calculate_rx_by_pq_into_branch(
     ps: float,
     qs: float,
     vsm: float,
@@ -101,15 +284,15 @@ def calculate_rx_by_pq_into_line(
     if ratio == 0:
         ratio = 1
 
-    v_from = vsm / ratio
+    vsm = vsm / ratio
 
-    A_coeff = -v_from * vrm * cos_t + v_from**2
-    B_coeff = -v_from * vrm * sin_t
+    A_coeff = -vsm * vrm * cos_t + vsm**2
+    B_coeff = -vsm * vrm * sin_t
     K1 = ps
 
-    C_coeff = -vrm * v_from * sin_t
-    D_coeff = vrm * v_from * cos_t - v_from**2
-    K2 = qs + (v_from**2) * b
+    C_coeff = -vrm * vsm * sin_t
+    D_coeff = vrm * vsm * cos_t - vsm**2
+    K2 = qs + (vsm**2) * b
 
     M = np.array([[A_coeff, B_coeff], [C_coeff, D_coeff]])
 
@@ -133,22 +316,26 @@ def test_case_into_line():
     pr = 230.22
     qr = -109.64
 
-    r, x = calculate_rx_by_pq_into_line(pr, qr, vsm, vrm, vsa, vra, ratio, b)
-    print(f"Calculated R and X: {r},{x}")
+    r_calc, x_calc = calculate_rx_by_pq_into_branch(
+        pr, qr, vsm, vrm, vsa, vra, ratio, b
+    )
+    print(f"Calculated R and X: {r_calc},{x_calc}")
     r = 0.00055
     x = 0.01074
-    print(
-        calc_flow_into_branch(
-            vsm=vsm,
-            vrm=vrm,
-            vsa=vsa,
-            vra=vra,
-            ratio=ratio,
-            r=r,
-            x=x,
-            b_total=b,
-        )
+    assert math.isclose(r, r_calc, rel_tol=1e-2)
+    assert math.isclose(x, x_calc, rel_tol=1e-2)
+    flow = calc_flow_into_branch(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
     )
+    assert math.isclose(flow.p, pr, rel_tol=1e-2)
+    assert math.isclose(flow.q, qr, rel_tol=1e-2)
 
 
 def test_case_from_line():
@@ -161,24 +348,29 @@ def test_case_from_line():
     pr = 246
     qr = -30.8
 
-    r, x = calculate_rx_by_pq_from_line(pr, qr, vsm, vrm, vsa, vra, ratio, b)
+    r_calc, x_calc = calculate_rx_by_pq_from_branch(
+        pr, qr, vsm, vrm, vsa, vra, ratio, b
+    )
 
-    print(f"Calculated R and X: {r},{x}")
+    print(f"Calculated R and X: {r_calc},{x_calc}")
     r = 0.000607
     x = 0.012024
-    print(
-        calc_flow_from_branch(
-            vsm=vsm,
-            vrm=vrm,
-            vsa=vsa,
-            vra=vra,
-            ratio=ratio,
-            r=r,
-            x=x,
-            b_total=b,
-            shift=0,
-        )
+    assert math.isclose(r, r_calc, rel_tol=1e-2)
+    assert math.isclose(x, x_calc, rel_tol=1e-2)
+
+    flow = calc_flow_from_branch(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        shift=0,
     )
+    assert math.isclose(flow.p, pr, rel_tol=1e-2)
+    assert math.isclose(flow.q, qr, rel_tol=1e-2)
 
 
 def test_case_from_line_w_shift():
@@ -196,7 +388,7 @@ def test_case_from_line_w_shift():
     gto = 0
     bto = 0
 
-    r, x = calculate_rx_by_pq_from_line(
+    r_calc, x_calc = calculate_rx_by_pq_from_branch(
         pr=pr,
         qr=qr,
         vsm=vsm,
@@ -206,24 +398,37 @@ def test_case_from_line_w_shift():
         ratio=ratio,
         b=b,
         shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+        model=Model.TARA,
     )
 
-    print(f"Calculated R and X: {r},{x}")
+    print(f"Calculated R and X: {r_calc},{x_calc}")
     r = 0.0002
     x = 0.02393
-    print(
-        calc_flow_from_branch(
-            vsm=vsm,
-            vrm=vrm,
-            vsa=vsa,
-            vra=vra,
-            ratio=ratio,
-            r=r,
-            x=x,
-            b_total=b,
-            shift=shift,
-        )
+    assert math.isclose(r, r_calc, rel_tol=3e-2)
+    assert math.isclose(x, x_calc, rel_tol=1e-2)
+
+    flow = calc_flow_from_branch(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+        shift=shift,
+        model=Model.TARA,
     )
+    assert math.isclose(flow.p, pr, rel_tol=1e-2)
+    assert math.isclose(flow.q, qr, rel_tol=1e-2)
 
 
 def test_case_into_line_w_shift():
@@ -241,7 +446,7 @@ def test_case_into_line_w_shift():
     gto = 0
     bto = 0
 
-    r, x = calculate_rx_by_pq_into_line(
+    r_calc, x_calc = calculate_rx_by_pq_into_branch(
         ps=ps,
         qs=qs,
         vsm=vsm,
@@ -253,22 +458,25 @@ def test_case_into_line_w_shift():
         shift=shift,
     )
 
-    print(f"Calculated R and X: {r},{x}")
+    print(f"Calculated R and X: {r_calc},{x_calc}")
     r = 0.0017
     x = 0.066
-    print(
-        calc_flow_into_branch(
-            vsm=vsm,
-            vrm=vrm,
-            vsa=vsa,
-            vra=vra,
-            ratio=ratio,
-            r=r,
-            x=x,
-            b_total=b,
-            shift=shift,
-        )
+    assert math.isclose(r, r_calc, rel_tol=1e-2)
+    assert math.isclose(x, x_calc, rel_tol=1e-2)
+
+    flow = calc_flow_into_branch(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        shift=shift,
     )
+    assert math.isclose(flow.p, ps, rel_tol=1e-2)
+    assert math.isclose(flow.q, qs, rel_tol=1e-2)
 
 
 def test_case_into_line_w_shunt():
@@ -286,7 +494,7 @@ def test_case_into_line_w_shunt():
     gto = 0
     bto = 0
 
-    r, x = calculate_rx_by_pq_into_line(
+    r_calc, x_calc = calculate_rx_by_pq_into_branch(
         ps=ps,
         qs=qs,
         vsm=vsm,
@@ -302,26 +510,29 @@ def test_case_into_line_w_shunt():
         bto=bto,
     )
 
-    print(f"Calculated R and X: {r},{x}")
+    print(f"Calculated R and X: {r_calc},{x_calc}")
     r = 0.00008
     x = 0.01928
-    print(
-        calc_flow_into_branch(
-            vsm=vsm,
-            vrm=vrm,
-            vsa=vsa,
-            vra=vra,
-            ratio=ratio,
-            r=r,
-            x=x,
-            b_total=b,
-            shift=shift,
-            gfrom=gfrom,
-            bfrom=bfrom,
-            gto=gto,
-            bto=bto,
-        )
+    assert math.isclose(r, r_calc, rel_tol=1e-2)
+    assert math.isclose(x, x_calc, rel_tol=1e-2)
+
+    flow = calc_flow_into_branch(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
     )
+    assert math.isclose(flow.p, ps, rel_tol=1e-2)
+    assert math.isclose(flow.q, qs, rel_tol=1e-2)
 
 
 def test_case_from_line_w_shunt():
@@ -339,7 +550,7 @@ def test_case_from_line_w_shunt():
     gto = 0
     bto = 1.0
 
-    r, x = calculate_rx_by_pq_from_line(
+    r_calc, x_calc = calculate_rx_by_pq_from_branch(
         pr=pr,
         qr=qr,
         vsm=vsm,
@@ -355,26 +566,35 @@ def test_case_from_line_w_shunt():
         bto=bto,
     )
 
-    print(f"Calculated R and X: {r},{x}")
+    print(f"Calculated R and X: {r_calc},{x_calc}")
     r = 0.00171
     x = 0.02042
-    print(
-        calc_flow_from_branch(
-            vsm=vsm,
-            vrm=vrm,
-            vsa=vsa,
-            vra=vra,
-            ratio=ratio,
-            r=r,
-            x=x,
-            b_total=b,
-            shift=shift,
-            gfrom=gfrom,
-            bfrom=bfrom,
-            gto=gto,
-            bto=bto,
-        )
+    assert math.isclose(r, r_calc, rel_tol=1e-2)
+    assert math.isclose(x, x_calc, rel_tol=1e-2)
+
+    flow = calc_flow_from_branch(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
     )
+    assert math.isclose(flow.p, pr, rel_tol=1e-2)
+    assert math.isclose(flow.q, qr, rel_tol=1e-2)
 
 
-test_case_into_line_w_shunt()
+if __name__ == "__main__":
+    test_case_into_line()
+    test_case_from_line()
+    test_case_from_line_w_shift()
+    test_case_into_line_w_shift()
+    test_case_from_line_w_shunt()
+    test_case_into_line_w_shunt()

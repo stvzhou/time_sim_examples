@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 import numpy as np
 import networkx as nx
 import pandas as pd
+from calc_rx import calc_flow_into_branch, calc_flow_from_branch, Flow
 
 # Ensure power_flow directory is in python path
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -81,45 +82,6 @@ except ImportError:
 # =============================================================================
 # Core Dataclasses
 # =============================================================================
-
-
-@dataclass
-class Flow:
-    """Active (P) and Reactive (Q) power flow representation.
-
-    Attributes:
-        p: Active power (MW)
-        q: Reactive power (MVAr)
-    """
-
-    p: float = 0.0
-    q: float = 0.0
-
-    @property
-    def s(self) -> float:
-        """Apparent power magnitude (MVA) S = sqrt(P^2 + Q^2)."""
-        return math.sqrt(self.p**2 + self.q**2)
-
-    def __add__(self, other: Flow) -> Flow:
-        return Flow(self.p + other.p, self.q + other.q)
-
-    def __sub__(self, other: Flow) -> Flow:
-        return Flow(self.p - other.p, self.q - other.q)
-
-    def __neg__(self) -> Flow:
-        return Flow(-self.p, -self.q)
-
-    def is_zero(self, tol: float = 1e-8) -> bool:
-        """Return True if both P and Q are within tolerance of zero."""
-        return abs(self.p) <= tol and abs(self.q) <= tol
-
-    def to_tuple(self) -> Tuple[float, float]:
-        """Return (p, q) tuple."""
-        return (self.p, self.q)
-
-    def to_dict(self) -> Dict[str, float]:
-        """Return dictionary representation."""
-        return {"p": self.p, "q": self.q, "s": self.s}
 
 
 @dataclass
@@ -238,139 +200,6 @@ class BusEnergyBalance:
     def balance(self) -> Flow:
         """Calculate and return net power mismatch at this bus."""
         return calc_bus_balance(self)
-
-
-# =============================================================================
-# Branch and Line Flow Calculations (MATPOWER Model)
-# =============================================================================
-
-
-def calc_flow_into_branch(
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    r: float,
-    x: float,
-    b_total: float = 0.0,
-    shift: float = 0.0,
-    ratio: float = 1.0,
-    gfrom: float = 0,
-    bfrom: float = 0,
-    gto: float = 0,
-    bto: float = 0,
-    base_mva: float = 100.0,
-) -> Flow:
-    """Calculate active and reactive power flow INTO a branch at the 'from' bus.
-    https://powsybl.readthedocs.io/projects/powsybl-open-loadflow/en/latest/loadflow/loadflow.html
-
-    Supports transmission lines and transformers with off-nominal tap ratio
-    and phase shift angle (tap is placed at the 'from' bus side as in MATPOWER).
-
-    Args:
-        vsm: Voltage magnitude at 'from' (sending) bus (p.u.)
-        vrm: Voltage magnitude at 'to' (receiving) bus (p.u.)
-        vsa: Voltage angle at 'from' bus (degrees)
-        vra: Voltage angle at 'to' bus (degrees)
-        r: Series resistance (p.u.)
-        x: Series reactance (p.u.)
-        b: Total branch charging susceptance (p.u.)
-        shift: Transformer phase shift angle (degrees, positive = delay)
-        base_mva: System base MVA (default: 100.0)
-
-    Returns:
-        Flow(p, q) in MW and MVAr leaving the 'from' bus into the branch.
-    """
-    if r**2 + x**2 == 0:
-        return Flow(0, 0)
-
-    a1 = np.deg2rad(shift)
-    b = b_total / 2.0
-    gkm = r / (r**2 + x**2)
-    bkm = -x / (r**2 + x**2)
-    theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
-    if ratio == 0:
-        ratio = 1
-    v_from = vsm / ratio
-
-    # Active power flow into branch at from bus
-    ps = (
-        v_from**2 * gkm
-        - v_from * vrm * gkm * np.cos(theta)
-        - v_from * vrm * bkm * np.sin(theta)
-    )
-
-    # Reactive power flow into branch at from bus
-    qs = (
-        -(v_from**2) * (bkm + b)
-        + v_from * vrm * bkm * np.cos(theta)
-        - v_from * vrm * gkm * np.sin(theta)
-    )
-    ps += gfrom * vsm * vsm
-    qs -= bfrom * vsm * vsm
-
-    return Flow(float(ps * base_mva), float(qs * base_mva))
-
-
-def calc_flow_from_branch(
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    r: float,
-    x: float,
-    b_total: float = 0.0,
-    shift: float = 0.0,
-    ratio: float = 1.0,
-    gfrom: float = 0,
-    bfrom: float = 0,
-    gto: float = 0,
-    bto: float = 0,
-    base_mva: float = 100.0,
-) -> Flow:
-    """Calculate active and reactive power flow entering the 'to' bus FROM the branch.
-
-    Args:
-        vsm: Voltage magnitude at 'from' (sending) bus (p.u.)
-        vrm: Voltage magnitude at 'to' (receiving) bus (p.u.)
-        vsa: Voltage angle at 'from' bus (degrees)
-        vra: Voltage angle at 'to' bus (degrees)
-        r: Series resistance (p.u.)
-        x: Series reactance (p.u.)
-        b: Total branch charging susceptance (p.u.)
-        shift: Transformer phase shift angle (degrees, positive = delay)
-        base_mva: System base MVA (default: 100.0)
-
-    Returns:
-        Flow(p, q) in MW and MVAr entering the 'to' bus from the branch.
-    """
-    if r**2 + x**2 == 0:
-        return Flow(0, 0)
-
-    a1 = np.deg2rad(shift)
-    b = b_total / 2.0
-    gkm = r / (r**2 + x**2)
-    bkm = -x / (r**2 + x**2)
-
-    # Angle difference from sending to receiving end
-    theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
-
-    if ratio == 0:
-        ratio = 1
-
-    vrm = vrm * ratio
-
-    # Active power flow injected at receiving bus from line
-    pr = (vrm**2) * gkm - vsm * vrm * (gkm * np.cos(theta) - bkm * np.sin(theta))
-
-    # Reactive power flow injected at receiving bus from line
-    qr = -(vrm**2) * (bkm + b) + vsm * vrm * (bkm * np.cos(theta) + gkm * np.sin(theta))
-
-    pr -= gto * vrm * vrm
-    qr -= bto * vrm * vrm
-
-    return Flow(float(pr * base_mva), float(qr * base_mva))
-
 
 # =============================================================================
 # Bus Balance Calculation
