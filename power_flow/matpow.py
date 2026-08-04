@@ -1347,8 +1347,8 @@ class MatpowerCase:
             if br.br_status > 0 and br.f_bus in G and br.t_bus in G:
                 G.add_edge(br.f_bus, br.t_bus)
         slack_buses = set(b.bus_i for b in self.bus if b.bus_type == 3)
-        components = list(nx.connected_components(G))
-        main_island = components[0]
+        main_island = max(nx.connected_components(G), key=len)
+
         return MatpowerCase(
             version="2",
             baseMVA=self.baseMVA,
