@@ -253,9 +253,12 @@ def calc_flow_into_branch(
     r: float,
     x: float,
     b_total: float = 0.0,
-    g_total: float = 0.0,
     shift: float = 0.0,
     ratio: float = 1.0,
+    gfrom: float = 0,
+    bfrom: float = 0,
+    gto: float = 0,
+    bto: float = 0,
     base_mva: float = 100.0,
 ) -> Flow:
     """Calculate active and reactive power flow INTO a branch at the 'from' bus.
@@ -282,28 +285,29 @@ def calc_flow_into_branch(
         return Flow(0, 0)
 
     a1 = np.deg2rad(shift)
-    g = g_total / 2.0
     b = b_total / 2.0
     gkm = r / (r**2 + x**2)
     bkm = -x / (r**2 + x**2)
-    theta = np.deg2rad(vsa) - np.deg2rad(vra) + a1
+    theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
     if ratio == 0:
         ratio = 1
-    ratio = 1 / ratio
+    v_from = vsm / ratio
 
     # Active power flow into branch at from bus
     ps = (
-        (ratio * vsm) ** 2 * gkm
-        - ratio * vsm * vrm * gkm * np.cos(theta)
-        - ratio * vsm * vrm * bkm * np.sin(theta)
+        v_from**2 * gkm
+        - v_from * vrm * gkm * np.cos(theta)
+        - v_from * vrm * bkm * np.sin(theta)
     )
 
     # Reactive power flow into branch at from bus
     qs = (
-        -((ratio * vsm) ** 2) * (bkm + b)
-        + ratio * vsm * vrm * bkm * np.cos(theta)
-        - ratio * vsm * vrm * gkm * np.sin(theta)
+        -(v_from**2) * (bkm + b)
+        + v_from * vrm * bkm * np.cos(theta)
+        - v_from * vrm * gkm * np.sin(theta)
     )
+    ps += gfrom * vsm * vsm
+    qs -= bfrom * vsm * vsm
 
     return Flow(float(ps * base_mva), float(qs * base_mva))
 
@@ -316,9 +320,12 @@ def calc_flow_from_branch(
     r: float,
     x: float,
     b_total: float = 0.0,
-    g_total: float = 0.0,
     shift: float = 0.0,
     ratio: float = 1.0,
+    gfrom: float = 0,
+    bfrom: float = 0,
+    gto: float = 0,
+    bto: float = 0,
     base_mva: float = 100.0,
 ) -> Flow:
     """Calculate active and reactive power flow entering the 'to' bus FROM the branch.
@@ -341,26 +348,26 @@ def calc_flow_from_branch(
         return Flow(0, 0)
 
     a1 = np.deg2rad(shift)
-    g = g_total / 2.0
     b = b_total / 2.0
     gkm = r / (r**2 + x**2)
     bkm = -x / (r**2 + x**2)
 
     # Angle difference from sending to receiving end
-    theta = np.deg2rad(vsa) - np.deg2rad(vra) + a1
+    theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
 
     if ratio == 0:
         ratio = 1
-    # Tap ratio applies to sending end bus:
-    v_from = vsm / ratio  # or vsm * ratio depending on off-nominal tap definition
+
+    vrm = vrm * ratio
 
     # Active power flow injected at receiving bus from line
-    pr = (vrm**2) * gkm - v_from * vrm * (gkm * np.cos(theta) - bkm * np.sin(theta))
+    pr = (vrm**2) * gkm - vsm * vrm * (gkm * np.cos(theta) - bkm * np.sin(theta))
 
     # Reactive power flow injected at receiving bus from line
-    qr = -(vrm**2) * (bkm + b) + v_from * vrm * (
-        bkm * np.cos(theta) + gkm * np.sin(theta)
-    )
+    qr = -(vrm**2) * (bkm + b) + vsm * vrm * (bkm * np.cos(theta) + gkm * np.sin(theta))
+
+    pr -= gto * vrm * vrm
+    qr -= bto * vrm * vrm
 
     return Flow(float(pr * base_mva), float(qr * base_mva))
 

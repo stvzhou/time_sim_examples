@@ -1281,7 +1281,7 @@ class MatpowerCase:
                     rate_b=float(b["RateB"]),
                     rate_c=float(b["RateC"]),
                     tap=float(b["TranRat"]),
-                    shift=-float(b["PhsShftDeg"]),
+                    shift=float(b["PhsShftDeg"]),
                     br_status=int(b["St"]),
                     flow_p=float(b["MW_Flow"]),
                     flow_q=float(b["MVAr_flow"]),
