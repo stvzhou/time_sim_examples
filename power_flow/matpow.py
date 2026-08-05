@@ -16,8 +16,10 @@ from __future__ import annotations
 import os
 import re
 import sys
+from io import StringIO
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
@@ -30,6 +32,11 @@ if _PKG_DIR not in sys.path:
     sys.path.insert(0, _PKG_DIR)
 
 from psse_raw import PsseRawData, parse_raw
+
+
+class FlowMeter(Enum):
+    FROM = "F"
+    TO = "T"
 
 
 # =============================================================================
@@ -420,10 +427,15 @@ class Branch:
     br_status: int = 1  # 1=in-service, 0=out-of-service
     angmin: float = -360.0  # degrees
     angmax: float = 360.0  # degrees
+    flow_meter: FlowMeter = FlowMeter.FROM
     flow_p: float = 0.0
     flow_q: float = 0.0
     loss_p: float = 0.0
     loss_q: float = 0.0
+    gs_from: float = 0.0
+    bs_from: float = 0.0
+    gs_to: float = 0.0
+    bs_to: float = 0.0
     pf: Optional[float] = None
     qf: Optional[float] = None
     pt: Optional[float] = None
@@ -533,7 +545,7 @@ def parse_matpower_m(filepath_or_str: Union[str, Path, os.PathLike]) -> Dict[str
     is_path = False
     try:
         if isinstance(filepath_or_str, (Path, os.PathLike)) or (
-            isinstance(filepath_or_str, str) and os.path.exists(filepath_or_str)
+                isinstance(filepath_or_str, str) and os.path.exists(filepath_or_str)
         ):
             is_path = True
     except Exception:
@@ -672,9 +684,38 @@ def parse_matpower_m(filepath_or_str: Union[str, Path, os.PathLike]) -> Dict[str
     return result
 
 
-# =============================================================================
-# MatpowerCase Container
-# =============================================================================
+def parse_single_multiterminal_dc(lines: List[str]) -> dict:
+    csv_data = "\n".join(lines[3:])
+    data = pd.read_csv(StringIO(csv_data))
+    data.columns = data.columns.str.strip()
+    bus = int(data["Bus#"].iloc[0])
+    data = data.iloc[1:]
+    data = data[data["Bus#"] == bus]
+    return {bus: {
+        "p": data["MW"].astype(float).sum(),
+        "q": data["MVAR"].astype(float).sum(),
+    }}
+
+
+def parse_multiterminal_dc(file_path: str) -> dict:
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    idx = 0
+    result = {}
+    while idx < len(lines):
+        line = lines[idx]
+        if "Multi-Terminal DC" in line:
+            single_record = []
+            idx += 1
+            while idx < len(lines) - 1 and "Shunt Voltage" not in lines[idx] and "Multi-Terminal DC" not in lines[
+                idx + 1]:
+                single_record.append(lines[idx])
+                idx += 1
+            result = result | parse_single_multiterminal_dc(single_record)
+
+        idx += 1
+
+    return result
 
 
 @dataclass
@@ -728,7 +769,7 @@ class MatpowerCase:
         return d
 
     def to_mat(
-        self, filepath: Union[str, Path, os.PathLike], struct_name: str = "mpc"
+            self, filepath: Union[str, Path, os.PathLike], struct_name: str = "mpc"
     ) -> None:
         """Save MATPOWER case directly to a MATLAB .mat file.
 
@@ -741,9 +782,9 @@ class MatpowerCase:
         savemat(str(filepath), {struct_name: self.to_dict()})
 
     def to_m(
-        self,
-        filepath: Union[str, Path, os.PathLike],
-        case_name: Optional[str] = None,
+            self,
+            filepath: Union[str, Path, os.PathLike],
+            case_name: Optional[str] = None,
     ) -> None:
         """Save MATPOWER case to a MATLAB .m file.
 
@@ -861,7 +902,7 @@ class MatpowerCase:
 
     @classmethod
     def from_mat(
-        cls, filepath: Union[str, Path, os.PathLike], struct_name: Optional[str] = None
+            cls, filepath: Union[str, Path, os.PathLike], struct_name: Optional[str] = None
     ) -> MatpowerCase:
         """Load a MATPOWER case directly from a MATLAB .mat file.
 
@@ -927,7 +968,7 @@ class MatpowerCase:
 
     @classmethod
     def from_m(
-        cls, filepath_or_str: Union[str, Path, os.PathLike]
+            cls, filepath_or_str: Union[str, Path, os.PathLike]
     ) -> MatpowerCase:
         """Load a MATPOWER case directly from a MATLAB .m file or .m format string.
 
@@ -1043,7 +1084,7 @@ class MatpowerCase:
                 x1_2 = t2.x1_2 / t2.sbase1_2 * base_mva
             elif t2.cz == 3:
                 rw = t2.r1_2 / t2.sbase1_2 / 1e6
-                xw = np.sqrt(t2.x1_2**2 - rw**2)
+                xw = np.sqrt(t2.x1_2 ** 2 - rw ** 2)
                 r1_2 = rw * base_mva / t2.sbase1_2
                 x1_2 = xw * base_mva / t2.sbase1_2
             else:
@@ -1119,9 +1160,9 @@ class MatpowerCase:
                 r1_2 = t3.r1_2 / t3.sbase1_2 / 1e6
                 r2_3 = t3.r2_3 / t3.sbase2_3 / 1e6
                 r3_1 = t3.r3_1 / t3.sbase3_1 / 1e6
-                x1_2 = np.sqrt(t3.x1_2**2 - r1_2**2)
-                x2_3 = np.sqrt(t3.x2_3**2 - r2_3**2)
-                x3_1 = np.sqrt(t3.x3_1**2 - r3_1**2)
+                x1_2 = np.sqrt(t3.x1_2 ** 2 - r1_2 ** 2)
+                x2_3 = np.sqrt(t3.x2_3 ** 2 - r2_3 ** 2)
+                x3_1 = np.sqrt(t3.x3_1 ** 2 - r3_1 ** 2)
                 r1_2 = r1_2 * base_mva / t3.sbase1_2
                 r2_3 = r2_3 * base_mva / t3.sbase2_3
                 r3_1 = r3_1 * base_mva / t3.sbase3_1
@@ -1205,25 +1246,60 @@ class MatpowerCase:
         load = pd.read_csv(os.path.join(file_dir, "LoadData.csv"), skiprows=9)
         gen = pd.read_csv(os.path.join(file_dir, "GenData.csv"), skiprows=9)
         branch = pd.read_csv(os.path.join(file_dir, "BranchData.csv"), skiprows=9)
+        vsc = pd.read_csv(os.path.join(file_dir, "VSCData.csv"), skiprows=9)
         bus.columns = bus.columns.str.strip()
         load.columns = load.columns.str.strip()
         gen.columns = gen.columns.str.strip()
         branch.columns = branch.columns.str.strip()
+        vsc.columns = vsc.columns.str.strip()
 
+        multi_term_dc_loads = parse_multiterminal_dc(os.path.join(file_dir, "DCLineBusFlows.csv"))
         load = load[load["St"] == 1]
         load["P"] = load["Pconst"] + load["Pcurrt"] + load["PAdmit"]
         load["Q"] = load["Qconst"] + load["Qcurrt"] + load["QAdmit"]
         bus_p = load.groupby("Bus#")["P"].sum().to_dict()
         bus_q = load.groupby("Bus#")["Q"].sum().to_dict()
 
-        hvdc_p = {}
-        hvdc_q = {}
+        hvdc_p = defaultdict(float)
+        hvdc_q = defaultdict(float)
         for _, b in branch.iterrows():
             if pd.isna(b["X"]) and int(b["St"]) == 1:
-                hvdc_p[b["Fr Bus"]] = b["MW_Flow"] + b["LossesMW"]
-                hvdc_q[b["Fr Bus"]] = b["MVAr_flow"]
-                hvdc_p[b["To Bus"]] = -b["MW_Flow"]
-                hvdc_q[b["To Bus"]] = -b["MVAr_flow"]
+                hvdc_p[b["Fr Bus"]] += b["MW_Flow"] + b["LossesMW"]
+                hvdc_q[b["Fr Bus"]] += b["MVAr_flow"]
+                hvdc_p[b["To Bus"]] -= b["MW_Flow"]
+                hvdc_q[b["To Bus"]] -= b["MVAr_flow"]
+        vsc_lines = {(b["Bus#"], b["Bus#.1"]) for _, b in vsc.iterrows()}
+        # for _, b in vsc.iterrows():
+        #     if b["Status"] == 0:
+        #         continue
+        #     hvdc_p[b["Bus#"]] += b["P From-To at Converter 1"]
+        #     hvdc_q[b["Bus#"]] += b["Q From-To at Converter 1"]
+        #     hvdc_p[b["Bus#.1"]] -= b["P From-To at Converter 2"]
+        #     hvdc_q[b["Bus#.1"]] -= b["Q From-To at Converter 2"]
+
+        for bus_id, dc_loads in multi_term_dc_loads.items():
+            hvdc_p[bus_id] += dc_loads["p"]
+            hvdc_q[bus_id] += dc_loads["q"]
+
+        line_shunts_p = defaultdict(float)
+        line_shunts_q = defaultdict(float)
+        v_square = {b["Bus#"]: b["Vmag [PU]"] ** 2 for _, b in bus.iterrows()}
+        for _, b in branch.iterrows():
+            if (b["Fr Bus"], b["To Bus"]) in vsc_lines:
+                continue
+            if not pd.isna(b["X"]) and int(b["St"]) == 1:
+                line_shunts_p[b["Fr Bus"]] += (
+                        b["ShuntGFrom"] * v_square.get(b["Fr Bus"], 1) * base_mva
+                )
+                line_shunts_q[b["Fr Bus"]] -= (
+                        b["ShuntBFrom"] * v_square.get(b["Fr Bus"], 1) * base_mva
+                )
+                line_shunts_p[b["To Bus"]] += (
+                        b["ShuntGTo"] * v_square.get(b["To Bus"], 1) * base_mva
+                )
+                line_shunts_q[b["To Bus"]] -= (
+                        b["ShuntBTo"] * v_square.get(b["To Bus"], 1) * base_mva
+                )
 
         mat_buses: List[Bus] = []
         for _, b in bus.iterrows():
@@ -1234,8 +1310,12 @@ class MatpowerCase:
                 Bus(
                     bus_i=b["Bus#"],
                     bus_type=b["CodeBTyp"],
-                    pd=bus_p.get(b["Bus#"], 0) + hvdc_p.get(b["Bus#"], 0),
-                    qd=bus_q.get(b["Bus#"], 0) + hvdc_q.get(b["Bus#"], 0),
+                    pd=bus_p.get(b["Bus#"], 0)
+                       + hvdc_p.get(b["Bus#"], 0)
+                       + line_shunts_p.get(b["Bus#"], 0),
+                    qd=bus_q.get(b["Bus#"], 0)
+                       + hvdc_q.get(b["Bus#"], 0)
+                       + line_shunts_q.get(b["Bus#"], 0),
                     gs=b["GShntOn"],
                     bs=bs,
                     bus_area=b["Area"],
@@ -1270,23 +1350,31 @@ class MatpowerCase:
             if pd.isna(b["X"]):
                 # HVDC
                 continue
+            ratio = float(b["TranRat"])
+            if ratio == 0:
+                ratio = 1
             mat_branches.append(
                 Branch(
                     f_bus=b["Fr Bus"],
                     t_bus=b["To Bus"],
                     br_r=float(b["R"]),
                     br_x=float(b["X"]),
-                    br_b=float(b["ShuntBFrom"]) + float(b["ShuntBTo"]),
+                    br_b=float(b["Charg"]),
                     rate_a=float(b["RateA"]),
                     rate_b=float(b["RateB"]),
                     rate_c=float(b["RateC"]),
-                    tap=float(b["TranRat"]),
+                    tap=ratio,
                     shift=float(b["PhsShftDeg"]),
                     br_status=int(b["St"]),
+                    flow_meter=FlowMeter(b["Mt"].strip()),
                     flow_p=float(b["MW_Flow"]),
                     flow_q=float(b["MVAr_flow"]),
                     loss_p=float(b["LossesMW"]),
                     loss_q=float(b["LossesMVAr"]),
+                    gs_from=float(b["ShuntGFrom"]),
+                    bs_from=float(b["ShuntBFrom"]),
+                    gs_to=float(b["ShuntGTo"]),
+                    bs_to=float(b["ShuntBTo"]),
                 )
             )
 
@@ -1371,15 +1459,16 @@ if __name__ == "__main__":
     import sys
 
     tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
-    mpc = MatpowerCase.from_tara(tara_file_dir)
-    for key, val in mpc.summary().items():
-        print(f"{key}: {val}")
-
-    print("\nExtracting main island...")
-    main_island = mpc.extract_main_island()
-    print(
-        "Main island slack buses: ",
-        [b.bus_i for b in main_island.bus if b.bus_type == 3],
-    )
-    for key, val in main_island.summary().items():
-        print(f"{key}: {val}")
+    # mpc = MatpowerCase.from_tara(tara_file_dir)
+    # for key, val in mpc.summary().items():
+    #     print(f"{key}: {val}")
+    #
+    # print("\nExtracting main island...")
+    # main_island = mpc.extract_main_island()
+    # print(
+    #     "Main island slack buses: ",
+    #     [b.bus_i for b in main_island.bus if b.bus_type == 3],
+    # )
+    # for key, val in main_island.summary().items():
+    #     print(f"{key}: {val}")
+    parse_multiterminal_dc(tara_file_dir + "DCLineBusFlows.csv")

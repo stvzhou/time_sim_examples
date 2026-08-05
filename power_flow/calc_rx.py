@@ -2,6 +2,7 @@ import numpy as np
 from enum import Enum
 import math
 from dataclasses import dataclass
+from matpow import MatpowerCase, FlowMeter
 
 
 class Model(Enum):
@@ -21,49 +22,24 @@ class Flow:
     p: float = 0.0
     q: float = 0.0
 
-    # @property
-    # def s(self) -> float:
-    #     """Apparent power magnitude (MVA) S = sqrt(P^2 + Q^2)."""
-    #     return math.sqrt(self.p**2 + self.q**2)
 
-    # def __add__(self, other: Flow) -> Flow:
-    #     return Flow(self.p + other.p, self.q + other.q)
-
-    # def __sub__(self, other: Flow) -> Flow:
-    #     return Flow(self.p - other.p, self.q - other.q)
-
-    # def __neg__(self) -> Flow:
-    #     return Flow(-self.p, -self.q)
-
-    # def is_zero(self, tol: float = 1e-8) -> bool:
-    #     """Return True if both P and Q are within tolerance of zero."""
-    #     return abs(self.p) <= tol and abs(self.q) <= tol
-
-    # def to_tuple(self) -> Tuple[float, float]:
-    #     """Return (p, q) tuple."""
-    #     return (self.p, self.q)
-
-    # def to_dict(self) -> Dict[str, float]:
-    #     """Return dictionary representation."""
-    #     return {"p": self.p, "q": self.q, "s": self.s}
-
-
-def calc_flow_into_branch(
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    r: float,
-    x: float,
-    b_total: float = 0.0,
-    shift: float = 0.0,
-    ratio: float = 1.0,
-    gfrom: float = 0,
-    bfrom: float = 0,
-    gto: float = 0,
-    bto: float = 0,
-    base_mva: float = 100.0,
+def calc_flow_from_bus(
+        vsm: float,
+        vrm: float,
+        vsa: float,
+        vra: float,
+        r: float,
+        x: float,
+        b_total: float = 0.0,
+        shift: float = 0.0,
+        ratio: float = 1.0,
+        gfrom: float = 0,
+        bfrom: float = 0,
+        gto: float = 0,
+        bto: float = 0,
+        base_mva: float = 100.0,
 ) -> Flow:
+    # Positive means from bus -> to bus
     """Calculate active and reactive power flow INTO a branch at the 'from' bus.
     https://powsybl.readthedocs.io/projects/powsybl-open-loadflow/en/latest/loadflow/loadflow.html
 
@@ -84,13 +60,13 @@ def calc_flow_into_branch(
     Returns:
         Flow(p, q) in MW and MVAr leaving the 'from' bus into the branch.
     """
-    if r**2 + x**2 == 0:
+    if r ** 2 + x ** 2 == 0:
         return Flow(0, 0)
 
     a1 = np.deg2rad(shift)
     b = b_total / 2.0
-    gkm = r / (r**2 + x**2)
-    bkm = -x / (r**2 + x**2)
+    gkm = r / (r ** 2 + x ** 2)
+    bkm = -x / (r ** 2 + x ** 2)
     theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
     if ratio == 0:
         ratio = 1
@@ -98,14 +74,14 @@ def calc_flow_into_branch(
 
     # Active power flow into branch at from bus
     ps = (
-        vsm**2 * gkm - vsm * vrm * gkm * np.cos(theta) - vsm * vrm * bkm * np.sin(theta)
+            vsm ** 2 * gkm - vsm * vrm * gkm * np.cos(theta) - vsm * vrm * bkm * np.sin(theta)
     )
 
     # Reactive power flow into branch at from bus
     qs = (
-        -(vsm**2) * (bkm + b)
-        + vsm * vrm * bkm * np.cos(theta)
-        - vsm * vrm * gkm * np.sin(theta)
+            -(vsm ** 2) * (bkm + b)
+            + vsm * vrm * bkm * np.cos(theta)
+            - vsm * vrm * gkm * np.sin(theta)
     )
 
     vsm = vsm * ratio
@@ -115,23 +91,24 @@ def calc_flow_into_branch(
     return Flow(float(ps * base_mva), float(qs * base_mva))
 
 
-def calc_flow_from_branch(
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    r: float,
-    x: float,
-    b_total: float = 0.0,
-    shift: float = 0.0,
-    ratio: float = 1.0,
-    gfrom: float = 0,
-    bfrom: float = 0,
-    gto: float = 0,
-    bto: float = 0,
-    base_mva: float = 100.0,
-    model: Model = Model.MATPOWER,
+def calc_flow_to_bus(
+        vsm: float,
+        vrm: float,
+        vsa: float,
+        vra: float,
+        r: float,
+        x: float,
+        b_total: float = 0.0,
+        shift: float = 0.0,
+        ratio: float = 1.0,
+        gfrom: float = 0,
+        bfrom: float = 0,
+        gto: float = 0,
+        bto: float = 0,
+        base_mva: float = 100.0,
+        model: Model = Model.MATPOWER,
 ) -> Flow:
+    # Positive means to bus -> from bus
     """Calculate active and reactive power flow entering the 'to' bus FROM the branch.
 
     Args:
@@ -148,13 +125,13 @@ def calc_flow_from_branch(
     Returns:
         Flow(p, q) in MW and MVAr entering the 'to' bus from the branch.
     """
-    if r**2 + x**2 == 0:
+    if r ** 2 + x ** 2 == 0:
         return Flow(0, 0)
 
     a1 = np.deg2rad(shift)
     b = b_total / 2.0
-    gkm = r / (r**2 + x**2)
-    bkm = -x / (r**2 + x**2)
+    gkm = r / (r ** 2 + x ** 2)
+    bkm = -x / (r ** 2 + x ** 2)
 
     # Angle difference from sending to receiving end
     theta = np.deg2rad(vsa) - np.deg2rad(vra) - a1
@@ -170,33 +147,33 @@ def calc_flow_from_branch(
         vsm = vsm / ratio
 
     # Active power flow injected at receiving bus from line
-    pr = (vrm**2) * gkm - vsm * vrm * (gkm * np.cos(theta) - bkm * np.sin(theta))
+    pr = (vrm ** 2) * gkm - vsm * vrm * (gkm * np.cos(theta) - bkm * np.sin(theta))
 
     # Reactive power flow injected at receiving bus from line
-    qr = -(vrm**2) * (bkm + b) + vsm * vrm * (bkm * np.cos(theta) + gkm * np.sin(theta))
+    qr = -(vrm ** 2) * (bkm + b) + vsm * vrm * (bkm * np.cos(theta) + gkm * np.sin(theta))
 
-    pr -= gto * (original_vrm**2)
-    qr -= bto * (original_vrm**2)
+    pr += gto * (original_vrm ** 2)
+    qr -= bto * (original_vrm ** 2)
 
     return Flow(float(pr * base_mva), float(qr * base_mva))
 
 
-def calculate_rx_by_pq_from_branch(
-    pr: float,
-    qr: float,
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    ratio: float,
-    b: float,
-    gfrom: float = 0,
-    bfrom: float = 0,
-    gto: float = 0,
-    bto: float = 0,
-    shift: float = 0,
-    sbase: float = 100,
-    model: Model = Model.MATPOWER,
+def calculate_rx_by_pq_to_bus(
+        pr: float,
+        qr: float,
+        vsm: float,
+        vrm: float,
+        vsa: float,
+        vra: float,
+        ratio: float,
+        b: float,
+        gfrom: float = 0,
+        bfrom: float = 0,
+        gto: float = 0,
+        bto: float = 0,
+        shift: float = 0,
+        sbase: float = 100,
+        model: Model = Model.MATPOWER,
 ):
     """
     Calculates r and x fromreceiving end power flows.
@@ -211,54 +188,55 @@ def calculate_rx_by_pq_from_branch(
     # Intermediate term shortcuts
     pr = pr / sbase
     qr = qr / sbase
-    pr += gto * vrm * vrm
+    pr -= gto * vrm * vrm
     qr += bto * vrm * vrm
 
     b = b / 2
     theta = np.radians(vsa - vra - shift)
     cos_t = np.cos(theta)
     sin_t = np.sin(theta)
-
+    if ratio == 0:
+        ratio = 1
     if model == Model.TARA:
         vrm = vrm * ratio
     elif model == Model.MATPOWER:
         vsm = vsm / ratio
 
-    A_coeff = -vsm * vrm * cos_t + vrm**2
+    A_coeff = -vsm * vrm * cos_t + vrm ** 2
     B_coeff = vsm * vrm * sin_t
     K1 = pr
 
     C_coeff = vrm * vsm * sin_t
-    D_coeff = (vrm * vsm * cos_t) - vrm**2
-    K2 = qr + (vrm**2) * b
+    D_coeff = (vrm * vsm * cos_t) - vrm ** 2
+    K2 = qr + (vrm ** 2) * b
 
     M = np.array([[A_coeff, B_coeff], [C_coeff, D_coeff]])
 
     K = np.array([K1, K2])
     gkm, bkm = np.linalg.solve(M, K)
 
-    denom = gkm**2 + bkm**2
+    denom = gkm ** 2 + bkm ** 2
     r = gkm / denom
     x = -bkm / denom
 
     return r, x
 
 
-def calculate_rx_by_pq_into_branch(
-    ps: float,
-    qs: float,
-    vsm: float,
-    vrm: float,
-    vsa: float,
-    vra: float,
-    ratio: float,
-    b: float,
-    gfrom: float = 0,
-    bfrom: float = 0,
-    gto: float = 0,
-    bto: float = 0,
-    shift=0,
-    sbase=100,
+def calculate_rx_by_pq_from_bus(
+        ps: float,
+        qs: float,
+        vsm: float,
+        vrm: float,
+        vsa: float,
+        vra: float,
+        ratio: float,
+        b: float,
+        gfrom: float = 0,
+        bfrom: float = 0,
+        gto: float = 0,
+        bto: float = 0,
+        shift=0,
+        sbase=100,
 ):
     """
     Calculates r and x from sending end power flows.
@@ -286,20 +264,20 @@ def calculate_rx_by_pq_into_branch(
 
     vsm = vsm / ratio
 
-    A_coeff = -vsm * vrm * cos_t + vsm**2
+    A_coeff = -vsm * vrm * cos_t + vsm ** 2
     B_coeff = -vsm * vrm * sin_t
     K1 = ps
 
     C_coeff = -vrm * vsm * sin_t
-    D_coeff = vrm * vsm * cos_t - vsm**2
-    K2 = qs + (vsm**2) * b
+    D_coeff = vrm * vsm * cos_t - vsm ** 2
+    K2 = qs + (vsm ** 2) * b
 
     M = np.array([[A_coeff, B_coeff], [C_coeff, D_coeff]])
 
     K = np.array([K1, K2])
     gkm, bkm = np.linalg.solve(M, K)
 
-    denom = gkm**2 + bkm**2
+    denom = gkm ** 2 + bkm ** 2
     r = gkm / denom
     x = -bkm / denom
 
@@ -324,7 +302,7 @@ def test_case_into_line():
     x = 0.01074
     assert math.isclose(r, r_calc, rel_tol=1e-2)
     assert math.isclose(x, x_calc, rel_tol=1e-2)
-    flow = calc_flow_into_branch(
+    flow = calc_flow_from_bus(
         vsm=vsm,
         vrm=vrm,
         vsa=vsa,
@@ -348,7 +326,7 @@ def test_case_from_line():
     pr = 246
     qr = -30.8
 
-    r_calc, x_calc = calculate_rx_by_pq_from_branch(
+    r_calc, x_calc = calculate_rx_by_pq_to_bus(
         pr, qr, vsm, vrm, vsa, vra, ratio, b
     )
 
@@ -358,7 +336,7 @@ def test_case_from_line():
     assert math.isclose(r, r_calc, rel_tol=1e-2)
     assert math.isclose(x, x_calc, rel_tol=1e-2)
 
-    flow = calc_flow_from_branch(
+    flow = calc_flow_to_bus(
         vsm=vsm,
         vrm=vrm,
         vsa=vsa,
@@ -388,7 +366,7 @@ def test_case_from_line_w_shift():
     gto = 0
     bto = 0
 
-    r_calc, x_calc = calculate_rx_by_pq_from_branch(
+    r_calc, x_calc = calculate_rx_by_pq_to_bus(
         pr=pr,
         qr=qr,
         vsm=vsm,
@@ -411,7 +389,7 @@ def test_case_from_line_w_shift():
     assert math.isclose(r, r_calc, rel_tol=3e-2)
     assert math.isclose(x, x_calc, rel_tol=1e-2)
 
-    flow = calc_flow_from_branch(
+    flow = calc_flow_to_bus(
         vsm=vsm,
         vrm=vrm,
         vsa=vsa,
@@ -464,7 +442,7 @@ def test_case_into_line_w_shift():
     assert math.isclose(r, r_calc, rel_tol=1e-2)
     assert math.isclose(x, x_calc, rel_tol=1e-2)
 
-    flow = calc_flow_into_branch(
+    flow = calc_flow_from_bus(
         vsm=vsm,
         vrm=vrm,
         vsa=vsa,
@@ -516,7 +494,7 @@ def test_case_into_line_w_shunt():
     assert math.isclose(r, r_calc, rel_tol=1e-2)
     assert math.isclose(x, x_calc, rel_tol=1e-2)
 
-    flow = calc_flow_into_branch(
+    flow = calc_flow_from_bus(
         vsm=vsm,
         vrm=vrm,
         vsa=vsa,
@@ -550,7 +528,7 @@ def test_case_from_line_w_shunt():
     gto = 0
     bto = 1.0
 
-    r_calc, x_calc = calculate_rx_by_pq_from_branch(
+    r_calc, x_calc = calculate_rx_by_pq_to_bus(
         pr=pr,
         qr=qr,
         vsm=vsm,
@@ -572,7 +550,7 @@ def test_case_from_line_w_shunt():
     assert math.isclose(r, r_calc, rel_tol=1e-2)
     assert math.isclose(x, x_calc, rel_tol=1e-2)
 
-    flow = calc_flow_from_branch(
+    flow = calc_flow_to_bus(
         vsm=vsm,
         vrm=vrm,
         vsa=vsa,
@@ -591,10 +569,240 @@ def test_case_from_line_w_shunt():
     assert math.isclose(flow.q, qr, rel_tol=1e-2)
 
 
+def test_case_from_line_w_gshunt():
+    vsm = 1.0086
+    vrm = 1.00887
+    vsa = -36.836
+    vra = -36.991
+    ratio = 1.0
+    shift = 0
+    b = 0.00593
+    pr = -61.21
+    qr = 15
+    gfrom = 0
+    bfrom = 0
+    gto = 0.0083
+    bto = 0
+
+    r_calc, x_calc = calculate_rx_by_pq_to_bus(
+        pr=pr,
+        qr=qr,
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        b=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+    )
+
+    print(f"Calculated R and X: {r_calc},{x_calc}")
+    r = 0.00061
+    x = 0.00428
+    assert math.isclose(r, r_calc, rel_tol=1e-2)
+    assert math.isclose(x, x_calc, rel_tol=1e-2)
+
+    flow = calc_flow_to_bus(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+        model=Model.TARA,
+    )
+    assert math.isclose(flow.p, pr, rel_tol=1e-2)
+    assert math.isclose(flow.q, qr, rel_tol=1e-2)
+
+
+def test_case_from_extra():
+    vsm = 0.99969
+    vrm = 0.99878
+    vsa = -72.449
+    vra = -45.313
+    ratio = 1.0
+    shift = 0
+    b = 10.7674
+    pr = 2886.1
+    qr = -3.58
+    gfrom = 0
+    bfrom = 0
+    gto = 0
+    bto = 0
+
+    r_calc, x_calc = calculate_rx_by_pq_to_bus(
+        pr=pr,
+        qr=qr,
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        b=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+    )
+
+    print(f"Calculated R and X: {r_calc},{x_calc}")
+    r = 0.00083
+    x = 0.01593
+    assert math.isclose(r, r_calc, rel_tol=3e-2)
+    assert math.isclose(x, x_calc, rel_tol=3e-2)
+
+    flow = calc_flow_to_bus(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+        model=Model.TARA,
+    )
+    assert math.isclose(flow.p, pr, abs_tol=1.0)
+    assert math.isclose(flow.q, qr, abs_tol=1.0)
+
+
+def test_case_into_line_zero_flow():
+    vsm = 0.97109
+    vrm = 0.97109
+    vsa = 11.351
+    vra = -18.649
+    ratio = 1.0
+    shift = 30
+    b = 0
+    ps = 0.02
+    qs = 0.04
+    gfrom = 0.0002
+    bfrom = -0.0004
+    gto = 0
+    bto = 0
+
+    r_calc, x_calc = calculate_rx_by_pq_into_branch(
+        ps=ps,
+        qs=qs,
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        b=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+    )
+
+    # print(f"Calculated R and X: {r_calc},{x_calc}")
+    r = 0.024
+    x = 0.34861
+    # assert math.isclose(r, r_calc, rel_tol=1e-2)
+    # assert math.isclose(x, x_calc, rel_tol=1e-2)
+
+    flow = calc_flow_from_bus(
+        vsm=vsm,
+        vrm=vrm,
+        vsa=vsa,
+        vra=vra,
+        ratio=ratio,
+        r=r,
+        x=x,
+        b_total=b,
+        shift=shift,
+        gfrom=gfrom,
+        bfrom=bfrom,
+        gto=gto,
+        bto=bto,
+    )
+    print(flow)
+    assert math.isclose(flow.p, ps, rel_tol=1e-2)
+    assert math.isclose(flow.q, qs, rel_tol=1e-2)
+
+
+def recalc_rx_based_on_flow(mpc: MatpowerCase) -> MatpowerCase:
+    bus_vm = {b.bus_i: b.vm for b in mpc.bus}
+    bus_va = {b.bus_i: b.va for b in mpc.bus}
+    for br in mpc.branch:
+        vsm = bus_vm[br.f_bus]
+        vrm = bus_vm[br.t_bus]
+        vsa = bus_va[br.f_bus]
+        vra = bus_va[br.t_bus]
+        if vsm == vrm and vsa == vra + br.shift:
+            continue
+        if br.flow_p == 0 and br.flow_q == 0:
+            continue
+        try:
+            if br.flow_meter == FlowMeter.TO:
+                r, x = calculate_rx_by_pq_to_bus(
+                    pr=-br.flow_p,
+                    qr=-br.flow_q,
+                    vsm=vsm,
+                    vrm=vrm,
+                    vsa=vsa,
+                    vra=vra,
+                    ratio=br.tap,
+                    b=br.br_b,
+                    shift=br.shift,
+                    gfrom=br.gs_from,
+                    bfrom=br.bs_from,
+                    gto=br.gs_to,
+                    bto=br.bs_to,
+                    model=Model.MATPOWER,
+                )
+            elif br.flow_meter == FlowMeter.FROM:
+                r, x = calculate_rx_by_pq_from_bus(
+                    ps=br.flow_p,
+                    qs=br.flow_q,
+                    vsm=vsm,
+                    vrm=vrm,
+                    vsa=vsa,
+                    vra=vra,
+                    ratio=br.tap,
+                    b=br.br_b,
+                    shift=br.shift,
+                    gfrom=br.gs_from,
+                    bfrom=br.bs_from,
+                    gto=br.gs_to,
+                    bto=br.bs_to,
+                )
+            else:
+                raise Exception(f"Branch {br.f_bus} {br.t_bus} has no flow meter")
+            br.br_r = r
+            br.br_x = x
+        except:
+            print(f"Branch {br.f_bus} {br.t_bus} cannot be solved")
+
+    return mpc
+
+
 if __name__ == "__main__":
-    test_case_into_line()
-    test_case_from_line()
-    test_case_from_line_w_shift()
-    test_case_into_line_w_shift()
-    test_case_from_line_w_shunt()
-    test_case_into_line_w_shunt()
+    # test_case_into_line()
+    # test_case_from_line()
+    # test_case_from_line_w_shift()
+    # test_case_into_line_w_shift()
+    # test_case_from_line_w_shunt()
+    # test_case_into_line_w_shunt()
+    # test_case_from_line_w_gshunt()
+    test_case_from_extra()
+    # test_case_into_line_zero_flow()
