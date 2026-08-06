@@ -1255,21 +1255,7 @@ class MatpowerCase:
             hvdc_p[bus_id] += flow["p"]
             hvdc_q[bus_id] += flow["q"]
 
-        # for _, b in branch.iterrows():
-        #     if pd.isna(b["X"]) and int(b["St"]) == 1:
-        #         hvdc_p[b["Fr Bus"]] += b["MW_Flow"]
-        #         hvdc_q[b["Fr Bus"]] += b["MVAr_flow"]
-        #         hvdc_p[b["To Bus"]] -= b["MW_Flow"] - b["LossesMW"]
-        #         hvdc_q[b["To Bus"]] -= b["MVAr_flow"]
-
         vsc_lines = {(b["Bus#"], b["Bus#.1"]) for _, b in vsc.iterrows()}
-        # for _, b in vsc.iterrows():
-        #     if b["Status"] == 0:
-        #         continue
-        #     hvdc_p[b["Bus#"]] += b["P From-To at Converter 1"]
-        #     hvdc_q[b["Bus#"]] += b["Q From-To at Converter 1"]
-        #     hvdc_p[b["Bus#.1"]] -= b["P From-To at Converter 2"]
-        #     hvdc_q[b["Bus#.1"]] -= b["Q From-To at Converter 2"]
 
         for bus_id, dc_loads in multi_term_dc_loads.items():
             hvdc_p[bus_id] += dc_loads["p"]
@@ -1325,7 +1311,7 @@ class MatpowerCase:
                     vmin=0.5,
                 )
             )
-        bus_to_va = {b.bus_i: b.va for b in mat_buses}
+        bus_to_vm = {b.bus_i: b.vm for b in mat_buses}
         mat_gens: List[Generator] = []
         for _, g in gen.iterrows():
             mat_gens.append(
@@ -1335,7 +1321,7 @@ class MatpowerCase:
                     qg=g["QGen"],
                     qmax=g["Qmax"],
                     qmin=g["Qmin"],
-                    vg=bus_to_va.get(g["Vg"], 1.0),
+                    vg=bus_to_vm.get(g["Bus#"], 1.0),
                     mbase=base_mva,
                     gen_status=g["Sta"],
                     pmax=g["Pmax"],
@@ -1358,7 +1344,7 @@ class MatpowerCase:
                     f_bus=b["Fr Bus"],
                     t_bus=b["To Bus"],
                     br_r=r,
-                    br_x=x if x != 0 else 0.00001,
+                    br_x=x,
                     br_b=float(b["Charg"]),
                     rate_a=float(b["RateA"]),
                     rate_b=float(b["RateB"]),
@@ -1483,3 +1469,45 @@ if __name__ == "__main__":
     #     print(f"{key}: {val}")
     # parse_hvdc(tara_file_dir + "DCLineBusFlows.csv")
     pass
+
+
+@dataclass
+class BusEnergyBalance:
+    bus_id: Union[int, str] = 0
+    vm: float = 1.0
+    va: float = 0.0
+    bus_type: int = 1
+    base_kv: float = 100.0
+    bus_area: int = 1
+    zone: int = 1
+    connected_component: int = 0
+    synchronous_component: int = 0
+    outgoing_flows: Dict[Any, Flow] = field(default_factory=dict)
+    shunts: Dict[Any, Flow] = field(default_factory=dict)
+    loads: Dict[Any, Flow] = field(default_factory=dict)
+    generations: Dict[Any, Flow] = field(default_factory=dict)
+    tara_bus_miss: Flow = None
+
+    def total_outgoing_flow(self) -> Flow:
+        """Sum of outgoing branch flows leaving this bus."""
+        p = sum(f.p for f in self.outgoing_flows.values())
+        q = sum(f.q for f in self.outgoing_flows.values())
+        return Flow(p, q)
+
+    def total_gen(self) -> Flow:
+        """Sum of generator generation at this bus."""
+        p = sum(f.p for f in self.generations.values())
+        q = sum(f.q for f in self.generations.values())
+        return Flow(p, q)
+
+    def total_load(self) -> Flow:
+        """Sum of loads consumed at this bus."""
+        p = sum(f.p for f in self.loads.values())
+        q = sum(f.q for f in self.loads.values())
+        return Flow(p, q)
+
+    def total_shunt(self) -> Flow:
+        """Sum of shunt flows at this bus."""
+        p = sum(f.p for f in self.shunts.values())
+        q = sum(f.q for f in self.shunts.values())
+        return Flow(p, q)

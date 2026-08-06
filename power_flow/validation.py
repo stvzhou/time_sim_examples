@@ -16,8 +16,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import networkx as nx
 import pandas as pd
@@ -25,10 +24,10 @@ from calc_rx import (
     calc_flow_from_bus,
     calc_flow_to_bus,
     Flow,
-    Model,
     recalc_rx_based_on_flow,
 )
-from power_flow.matpow import FlowMeter
+from power_flow.matpow import FlowMeter, BusEnergyBalance
+from merge_zbr import merge_zero_impedance_branches
 
 # Ensure power_flow directory is in python path
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -118,57 +117,6 @@ class BusInfo:
     bus_area: int = 1
     zone: int = 1
     substation_id: Optional[str] = None
-
-
-@dataclass
-class BusEnergyBalance:
-    bus_id: Union[int, str] = 0
-    vm: float = 1.0
-    va: float = 0.0
-    bus_type: int = 1
-    base_kv: float = 100.0
-    bus_area: int = 1
-    zone: int = 1
-    connected_component: int = 0
-    synchronous_component: int = 0
-    outgoing_flows: Dict[Any, Flow] = field(default_factory=dict)
-    shunts: Dict[Any, Flow] = field(default_factory=dict)
-    loads: Dict[Any, Flow] = field(default_factory=dict)
-    generations: Dict[Any, Flow] = field(default_factory=dict)
-    tara_bus_miss: Flow = None
-
-    def total_outgoing_flow(self) -> Flow:
-        """Sum of outgoing branch flows leaving this bus."""
-        p = sum(f.p for f in self.outgoing_flows.values())
-        q = sum(f.q for f in self.outgoing_flows.values())
-        return Flow(p, q)
-
-    def total_gen(self) -> Flow:
-        """Sum of generator generation at this bus."""
-        p = sum(f.p for f in self.generations.values())
-        q = sum(f.q for f in self.generations.values())
-        return Flow(p, q)
-
-    def total_load(self) -> Flow:
-        """Sum of loads consumed at this bus."""
-        p = sum(f.p for f in self.loads.values())
-        q = sum(f.q for f in self.loads.values())
-        return Flow(p, q)
-
-    def total_shunt(self) -> Flow:
-        """Sum of shunt flows at this bus."""
-        p = sum(f.p for f in self.shunts.values())
-        q = sum(f.q for f in self.shunts.values())
-        return Flow(p, q)
-
-    def balance(self) -> Flow:
-        """Calculate and return net power mismatch at this bus."""
-        return calc_bus_balance(self)
-
-
-# =============================================================================
-# Bus Balance Calculation
-# =============================================================================
 
 
 def calc_bus_balance(bus: BusEnergyBalance) -> Flow:
@@ -502,262 +450,6 @@ def build_bus_energy_balances(case: Any) -> Dict[Union[int, str], BusEnergyBalan
     id_to_bus = get_bus_miss(case, id_to_bus)
 
     return id_to_bus
-
-
-# =============================================================================
-# Low Impedance, Short Circuit, and Islanding Tools (following psbl.py)
-# =============================================================================
-
-
-def is_buses_short_circuited(
-        bus1: BusEnergyBalance,
-        bus2: BusEnergyBalance,
-        vm_tol: float = 0.01,
-        va_tol: float = 0.01,
-) -> bool:
-    """Check if two buses are short-circuited (nearly identical voltage magnitude & angle)."""
-    return abs(bus1.vm - bus2.vm) < vm_tol and abs(bus1.va - bus2.va) < va_tol
-
-
-def open_low_impedance_branches(
-        case: Any,
-        id_to_bus: Dict[Union[int, str], BusEnergyBalance],
-        x_threshold: float = 0.0002,
-        angle_diff_ratio: float = 30.0,
-        min_va_diff: float = 0.01,
-) -> List[int]:
-    """Identify branches with low reactance and high angle differences to disconnect.
-
-    Args:
-        case: MATPOWER case object or dict.
-        id_to_bus: Dict mapping bus_id -> BusEnergyBalance.
-        x_threshold: Reactance threshold (default: 0.0002 p.u.).
-        angle_diff_ratio: Angle diff (rad) / x ratio threshold (default: 30.0).
-        min_va_diff: Minimum angle difference in degrees (default: 0.01 deg).
-
-    Returns:
-        List of branch indices that were identified for disconnection.
-    """
-    _, _, _, branch_data = _get_case_components(case)
-    disconnected_indices: List[int] = []
-
-    if isinstance(branch_data, np.ndarray):
-        for idx in range(branch_data.shape[0]):
-            row = branch_data[idx]
-            status = int(row[10]) if len(row) > 10 else 1
-            if status <= 0:
-                continue
-
-            fb = int(row[F_BUS])
-            tb = int(row[T_BUS])
-            x = float(row[3])
-
-            if fb in id_to_bus and tb in id_to_bus and abs(x) < x_threshold:
-                bus1 = id_to_bus[fb]
-                bus2 = id_to_bus[tb]
-                va_diff_rad = abs(np.radians(bus1.va) - np.radians(bus2.va))
-                va_diff_deg = abs(bus1.va - bus2.va)
-
-                if (
-                        va_diff_rad / max(abs(x), 1e-6)
-                ) > angle_diff_ratio and va_diff_deg > min_va_diff:
-                    disconnected_indices.append(idx)
-                    row[10] = 0  # Disconnect in numpy matrix
-
-    elif isinstance(branch_data, list):
-        for idx, br in enumerate(branch_data):
-            if hasattr(br, "br_status"):
-                if not br.is_in_service:
-                    continue
-                fb = br.f_bus
-                tb = br.t_bus
-                x = br.br_x
-                if fb in id_to_bus and tb in id_to_bus and abs(x) < x_threshold:
-                    bus1 = id_to_bus[fb]
-                    bus2 = id_to_bus[tb]
-                    va_diff_rad = abs(np.radians(bus1.va) - np.radians(bus2.va))
-                    va_diff_deg = abs(bus1.va - bus2.va)
-                    if (
-                            va_diff_rad / max(abs(x), 1e-6)
-                    ) > angle_diff_ratio and va_diff_deg > min_va_diff:
-                        disconnected_indices.append(idx)
-                        br.br_status = 0
-            elif isinstance(br, list):
-                status = int(br[10]) if len(br) > 10 else 1
-                if status <= 0:
-                    continue
-                fb = int(br[F_BUS])
-                tb = int(br[T_BUS])
-                x = float(br[3])
-                if fb in id_to_bus and tb in id_to_bus and abs(x) < x_threshold:
-                    bus1 = id_to_bus[fb]
-                    bus2 = id_to_bus[tb]
-                    va_diff_rad = abs(np.radians(bus1.va) - np.radians(bus2.va))
-                    va_diff_deg = abs(bus1.va - bus2.va)
-                    if (
-                            va_diff_rad / max(abs(x), 1e-6)
-                    ) > angle_diff_ratio and va_diff_deg > min_va_diff:
-                        disconnected_indices.append(idx)
-                        br[10] = 0
-
-    return disconnected_indices
-
-
-def find_short_circuit_buses(
-        case: Any,
-        id_to_bus: Dict[Union[int, str], BusEnergyBalance],
-        vm_tol: float = 0.01,
-        va_tol: float = 0.01,
-) -> Tuple[List[int], List[Set[Union[int, str]]]]:
-    """Find short-circuited connected components across branches.
-
-    Args:
-        case: MATPOWER case object or dict.
-        id_to_bus: Dict mapping bus_id -> BusEnergyBalance.
-        vm_tol: Voltage magnitude tolerance (p.u.).
-        va_tol: Voltage angle tolerance (degrees).
-
-    Returns:
-        Tuple of (disconnected branch indices, list of connected component sets of bus IDs).
-    """
-    try:
-        import networkx as nx
-    except ImportError:
-        # Fallback simple BFS if networkx is not installed
-        return [], []
-
-    _, _, _, branch_data = _get_case_components(case)
-    g = nx.Graph()
-    disconnected_branches: List[int] = []
-
-    if isinstance(branch_data, np.ndarray):
-        for idx in range(branch_data.shape[0]):
-            row = branch_data[idx]
-            status = int(row[10]) if len(row) > 10 else 1
-            if status <= 0:
-                continue
-            fb = int(row[F_BUS])
-            tb = int(row[T_BUS])
-            if fb in id_to_bus and tb in id_to_bus:
-                if is_buses_short_circuited(
-                        id_to_bus[fb], id_to_bus[tb], vm_tol, va_tol
-                ):
-                    g.add_edge(fb, tb)
-                    disconnected_branches.append(idx)
-                    row[10] = 0
-    else:
-        for idx, br in enumerate(branch_data):
-            if hasattr(br, "f_bus"):
-                if not br.is_in_service:
-                    continue
-                fb, tb = br.f_bus, br.t_bus
-                if fb in id_to_bus and tb in id_to_bus:
-                    if is_buses_short_circuited(
-                            id_to_bus[fb], id_to_bus[tb], vm_tol, va_tol
-                    ):
-                        g.add_edge(fb, tb)
-                        disconnected_branches.append(idx)
-                        br.br_status = 0
-            elif isinstance(br, (list, tuple)):
-                status = int(br[10]) if len(br) > 10 else 1
-                if status <= 0:
-                    continue
-                fb, tb = int(br[F_BUS]), int(br[T_BUS])
-                if fb in id_to_bus and tb in id_to_bus:
-                    if is_buses_short_circuited(
-                            id_to_bus[fb], id_to_bus[tb], vm_tol, va_tol
-                    ):
-                        g.add_edge(fb, tb)
-                        disconnected_branches.append(idx)
-                        if isinstance(br, list):
-                            br[10] = 0
-
-    components = [set(c) for c in nx.connected_components(g)]
-    return disconnected_branches, components
-
-
-def get_equivalent_buses(
-        islands: Sequence[Set[Union[int, str]]],
-        star_buses: Optional[Set[Union[int, str]]] = None,
-) -> Dict[Union[int, str], Union[int, str]]:
-    """Map each bus in an island to a single retained representative bus."""
-    if star_buses is None:
-        star_buses = set()
-
-    result: Dict[Union[int, str], Union[int, str]] = {}
-    for island in islands:
-        island_list = list(island)
-        bus_to_keep = island_list[0]
-        for b in island:
-            if b in star_buses:
-                bus_to_keep = b
-                break
-
-        for b in island:
-            if b != bus_to_keep:
-                result[b] = bus_to_keep
-
-    return result
-
-
-def subs_with_volt_violations(
-        case_or_id_to_bus: Union[Any, Dict[Union[int, str], BusEnergyBalance]],
-        top_n: int = 10,
-        vmin: float = 0.9,
-        vmax: float = 1.1,
-        violate_upper_limit: bool = True,
-) -> List[BusInfo]:
-    """Find buses with top voltage magnitude limit violations (following psbl.py).
-
-    Args:
-        case_or_id_to_bus: MATPOWER case or id_to_bus dictionary.
-        top_n: Number of top violating buses to return.
-        vmin: Minimum voltage limit (p.u.).
-        vmax: Maximum voltage limit (p.u.).
-        violate_upper_limit: If True, sort by highest voltage (overvoltage).
-                             If False, sort by lowest voltage (undervoltage).
-
-    Returns:
-        List of BusInfo instances.
-    """
-    if isinstance(case_or_id_to_bus, dict) and all(
-            isinstance(v, BusEnergyBalance) for v in case_or_id_to_bus.values()
-    ):
-        id_to_bus = case_or_id_to_bus
-    else:
-        id_to_bus = init_bus_energy_balances(case_or_id_to_bus)
-
-    buses = [b for b in id_to_bus.values() if b.bus_type != 4]
-
-    if violate_upper_limit:
-        buses = [b for b in buses if b.vm > vmax]
-        buses.sort(key=lambda b: b.vm, reverse=True)
-    else:
-        buses = [b for b in buses if b.vm < vmin]
-        buses.sort(key=lambda b: b.vm, reverse=False)
-
-    result: List[BusInfo] = []
-    for b in buses[:top_n]:
-        bal = calc_bus_balance(b)
-        result.append(
-            BusInfo(
-                id=b.bus_id,
-                bus_type=b.bus_type,
-                v_mag=b.vm,
-                v_angle=b.va,
-                p_mismatch=bal.p,
-                q_mismatch=bal.q,
-                base_kv=b.base_kv,
-                bus_area=b.bus_area,
-                zone=b.zone,
-            )
-        )
-    return result
-
-
-# =============================================================================
-# Validation Report and High-Level Validation Functions
-# =============================================================================
 
 
 @dataclass
@@ -1139,8 +831,8 @@ def validate_matpower_energy_balance(
 
     print(report.summary())
     if violations:
-        print_bus_balance_summary(id_to_bus, case.branch, top_n=30, p_tol=p_tol, q_tol=q_tol, sort_by="p")
-        print_bus_balance_summary(id_to_bus, case.branch, top_n=30, p_tol=p_tol, q_tol=q_tol, sort_by="q")
+        print_bus_balance_summary(id_to_bus, case.branch, top_n=10, p_tol=p_tol, q_tol=q_tol, sort_by="p")
+        print_bus_balance_summary(id_to_bus, case.branch, top_n=10, p_tol=p_tol, q_tol=q_tol, sort_by="q")
 
     return violations
 
@@ -1188,104 +880,6 @@ def is_buses_short_circuited(bus1: BusEnergyBalance, bus2: BusEnergyBalance):
     return False
 
 
-def find_low_x_branches(
-        mpc: MatpowerCase,
-        id_to_bus: Dict[int, BusEnergyBalance],
-        x_threshold: float = 0.00001,
-) -> Dict[int, int]:
-    g = nx.Graph()
-    for br in mpc.branch:
-        # if abs(br.br_r) < x_threshold:
-        #     g.add_edge(br.f_bus, br.t_bus)
-        #     continue
-        if np.sqrt(abs(br.br_x) ** 2 + abs(br.br_r) ** 2) > x_threshold:
-            continue
-        # if not is_buses_short_circuited(id_to_bus[br.f_bus], id_to_bus[br.t_bus]):
-        #     continue
-        g.add_edge(br.f_bus, br.t_bus)
-
-    cc = list(nx.connected_components(g))
-
-    bus_del_to_keep = {}
-    for island in cc:
-        bus_to_keep = None
-        for bus in island:
-            if bus not in mpc.star_buses:
-                bus_to_keep = bus
-                break
-        assert bus_to_keep is not None
-        for bus in island:
-            if bus != bus_to_keep:
-                bus_del_to_keep[bus] = bus_to_keep
-
-    return bus_del_to_keep
-
-
-def open_branch_connect_to_del_buses(
-        mpc: MatpowerCase, bus_del_to_keep: Dict[int, int]
-) -> MatpowerCase:
-    for br in mpc.branch:
-        if br.f_bus in bus_del_to_keep:
-            br.br_status = 0
-            print(f"Open branch between {br.f_bus} and {br.t_bus} with x = {br.br_x}")
-
-        if br.t_bus in bus_del_to_keep:
-            br.br_status = 0
-            print(f"Open branch between {br.f_bus} and {br.t_bus} with x = {br.br_x}")
-
-    return mpc
-
-
-def replace_bus_ids(mpc: MatpowerCase, bus_del_to_keep: Dict[int, int]) -> MatpowerCase:
-    for br in mpc.branch:
-        if br.f_bus in bus_del_to_keep:
-            print(
-                f"Replace branch f_bus from {br.f_bus} to {bus_del_to_keep[br.f_bus]}"
-            )
-            br.f_bus = bus_del_to_keep[br.f_bus]
-
-        if br.t_bus in bus_del_to_keep:
-            print(
-                f"Replace branch t_bus from {br.t_bus} to {bus_del_to_keep[br.t_bus]}"
-            )
-            br.t_bus = bus_del_to_keep[br.t_bus]
-
-    for gen in mpc.gen:
-        if gen.gen_bus in bus_del_to_keep:
-            print(
-                f"Replace gen bus id {gen.gen_bus} with {bus_del_to_keep[gen.gen_bus]}"
-            )
-            gen.gen_bus = bus_del_to_keep[gen.gen_bus]
-
-    bus_p = defaultdict(float)
-    bus_q = defaultdict(float)
-    bus_shunt = defaultdict(float)
-    for bus in mpc.bus:
-        if bus.bus_i in bus_del_to_keep:
-            bus.bus_type = 4
-            bus_p[bus_del_to_keep[bus.bus_i]] += bus.pd
-            bus_q[bus_del_to_keep[bus.bus_i]] += bus.qd
-            bus_shunt[bus_del_to_keep[bus.bus_i]] += bus.gs
-            print(f"Set bus id {bus.bus_i} as isolated bus.")
-
-    for bus in mpc.bus:
-        if bus.bus_type == 4:
-            continue
-        bus.pd += bus_p.get(bus.bus_i, 0)
-        bus.qd += bus_q.get(bus.bus_i, 0)
-        bus.gs += bus_shunt.get(bus.bus_i, 0)
-
-    return mpc
-
-
-def open_branch_from_to_same_bus(mpc: MatpowerCase) -> MatpowerCase:
-    for br in mpc.branch:
-        if br.f_bus == br.t_bus:
-            br.br_status = 0
-            print(f"Open branch between {br.f_bus} and {br.t_bus} with x = {br.br_x}")
-    return mpc
-
-
 # =============================================================================
 # Execution and Demonstration
 # =============================================================================
@@ -1293,7 +887,6 @@ def open_branch_from_to_same_bus(mpc: MatpowerCase) -> MatpowerCase:
 if __name__ == "__main__":
     import os
     import sys
-    from psse_raw import parse_raw
     from matpow import MatpowerCase
 
     # raw_file = (
@@ -1311,18 +904,11 @@ if __name__ == "__main__":
     tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
     mpc = MatpowerCase.from_tara(tara_file_dir)
     mpc = mpc.extract_main_island()
-    # for br in mpc.branch:
-    #     if abs(br.br_x) < 0.00001:
-    #         br.br_x = 0.00001
-    #     if abs(br.br_r) > 10 * abs(br.br_r):
-    #         br.br_r = 10 * br.br_x
-    mpc = recalc_rx_based_on_flow(mpc)
-
+    # mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/raw.mat")
+    # mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/raw.mat")
     # id_to_bus = build_bus_energy_balances(mpc)
-    # bus_del_to_keep = find_low_x_branches(mpc, id_to_bus)
-    # mpc = open_branch_connect_to_del_buses(mpc, bus_del_to_keep)
-    # mpc = replace_bus_ids(mpc, bus_del_to_keep)
-    # mpc = open_branch_from_to_same_bus(mpc)
+    # mpc = merge_zero_impedance_branches(mpc, id_to_bus)
+    mpc = recalc_rx_based_on_flow(mpc)
 
     # Re-evaluate energy balance after topology updates
     id_to_bus = build_bus_energy_balances(mpc)
@@ -1334,15 +920,13 @@ if __name__ == "__main__":
     print("Min X: ", min([abs(b.br_x) for b in mpc.branch]))
     print("Max R: ", max([abs(b.br_r) for b in mpc.branch]))
     print("Min R: ", min([abs(b.br_r) for b in mpc.branch]))
-    print("Max R/X", max([abs(b.br_r / b.br_x) for b in mpc.branch]))
+    print("Max R/X: ", max([abs(b.br_r / b.br_x) for b in mpc.branch]))
 
     violation_p = {v.id: v.p_mismatch for v in violations}
     violation_q = {v.id: v.q_mismatch for v in violations}
     for bus in mpc.bus:
-        bus.pd -= violation_p.get(bus.bus_i, 0)
+        # bus.pd -= violation_p.get(bus.bus_i, 0)
         bus.qd -= violation_q.get(bus.bus_i, 0)
-
-    # from scipy.io import savemat
 
     mpc.extract_main_island().to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
     mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
@@ -1352,7 +936,7 @@ if __name__ == "__main__":
         mpc, p_tol=0.0001, q_tol=0.0001
     )
 
-    from pypower.api import runpf, rundcpf
+    from pypower.api import runpf
     from pypower.ppoption import ppoption
 
     ppc = mpc.to_dict()
@@ -1360,7 +944,7 @@ if __name__ == "__main__":
     ppopt = ppoption(
         MODEL="AC",  # AC power flow model
         PF_ALG=1,  # 1 = Newton-Raphson ('NR')
-        PF_TOL=1e-2,  # Convergence tolerance
+        PF_TOL=1e-3,  # Convergence tolerance
         PF_MAX_IT=20,  # Maximum iteration limit
         ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
         OUT_ALL=0,  # Do not print bus/branch/gen result tables

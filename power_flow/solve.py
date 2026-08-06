@@ -34,8 +34,8 @@ ppc = mpc.to_dict()
 ppopt = ppoption(
     MODEL="AC",  # AC power flow model
     PF_ALG=1,  # 1 = Newton-Raphson ('NR')
-    PF_TOL=1e-2,  # Convergence tolerance
-    PF_MAX_IT=20,  # Maximum iteration limit
+    PF_TOL=1e-4,  # Convergence tolerance
+    PF_MAX_IT=40,  # Maximum iteration limit
     ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
     OUT_ALL=0,  # Do not print bus/branch/gen result tables
     VERBOSE=1,  # Print solver progress info

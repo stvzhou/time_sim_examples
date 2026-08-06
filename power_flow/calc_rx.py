@@ -3,15 +3,28 @@ from enum import Enum
 import math
 import numpy as np
 from collections import defaultdict
-
+from typing import Tuple, Optional, Any
 from pygments.styles import default
 
 from matpow import MatpowerCase, FlowMeter, Flow
+from power_flow.matpow import Branch
 
 
 class Model(Enum):
     MATPOWER = "MATPOWER"
     TARA = "TARA"
+
+
+def _is_legit_impedance(r: float, x: float) -> bool:
+    if x == 0 or not np.isfinite(x) or not np.isfinite(r):
+        return False
+    # if abs(x) >= 0.00001:
+    #     br.br_x = x
+    # elif x < 0:
+    #     br.br_x = -0.00001
+    # else:
+    #     br.br_x = 0.00001
+    return True
 
 
 def calc_flow_from_bus(
@@ -165,7 +178,7 @@ def calculate_rx_by_pq_to_bus(
         shift: float = 0,
         sbase: float = 100,
         model: Model = Model.MATPOWER,
-):
+) -> Tuple[Optional[float], Optional[float]]:
     """
     Calculates r and x fromreceiving end power flows.
 
@@ -204,12 +217,17 @@ def calculate_rx_by_pq_to_bus(
     M = np.array([[A_coeff, B_coeff], [C_coeff, D_coeff]])
 
     K = np.array([K1, K2])
-    gkm, bkm = np.linalg.solve(M, K)
 
-    denom = gkm ** 2 + bkm ** 2
+    try:
+        gkm, bkm = np.linalg.solve(M, K)
+        denom = gkm ** 2 + bkm ** 2
+        r = gkm / denom
+        x = -bkm / denom
+    except:
+        return None, None
 
-    r = gkm / denom
-    x = -bkm / denom
+    if not _is_legit_impedance(r=r, x=x):
+        return None, None
 
     return r, x
 
@@ -229,7 +247,7 @@ def calculate_rx_by_pq_from_bus(
         bto: float = 0,
         shift=0,
         sbase=100,
-):
+) -> Tuple[Optional[float], Optional[float]]:
     """
     Calculates r and x from sending end power flows.
 
@@ -267,13 +285,100 @@ def calculate_rx_by_pq_from_bus(
     M = np.array([[A_coeff, B_coeff], [C_coeff, D_coeff]])
 
     K = np.array([K1, K2])
-    gkm, bkm = np.linalg.solve(M, K)
 
-    denom = gkm ** 2 + bkm ** 2
-    r = gkm / denom
-    x = -bkm / denom
+    try:
+        gkm, bkm = np.linalg.solve(M, K)
+        denom = gkm ** 2 + bkm ** 2
+        r = gkm / denom
+        x = -bkm / denom
+    except:
+        return None, None
+
+    if not _is_legit_impedance(r=r, x=x):
+        return None, None
 
     return r, x
+
+
+def recalc_rx_based_on_flow(mpc: MatpowerCase, base_mva=100) -> MatpowerCase:
+    bus_vm = {b.bus_i: b.vm for b in mpc.bus}
+    bus_va = {b.bus_i: b.va for b in mpc.bus}
+    dummy_p = defaultdict(float)
+    dummy_q = defaultdict(float)
+    for br in mpc.branch:
+        vsm = bus_vm[br.f_bus]
+        vrm = bus_vm[br.t_bus]
+        vsa = bus_va[br.f_bus]
+        vra = bus_va[br.t_bus]
+        if vsm == vrm and vsa == vra + br.shift and br.br_r == 0 and br.br_x <= 0.0001:
+            dummy_p, dummy_q = open_branch_create_dummy_loads(base_mva, br, dummy_p, dummy_q, vrm, vsm)
+            continue
+
+        if br.flow_meter == FlowMeter.TO:
+            r, x = calculate_rx_by_pq_to_bus(
+                pr=-br.flow_p,
+                qr=-br.flow_q,
+                vsm=vsm,
+                vrm=vrm,
+                vsa=vsa,
+                vra=vra,
+                ratio=br.tap,
+                b=br.br_b,
+                shift=br.shift,
+                gfrom=br.gs_from,
+                bfrom=br.bs_from,
+                gto=br.gs_to,
+                bto=br.bs_to,
+                model=Model.MATPOWER,
+            )
+        elif br.flow_meter == FlowMeter.FROM:
+            r, x = calculate_rx_by_pq_from_bus(
+                ps=br.flow_p,
+                qs=br.flow_q,
+                vsm=vsm,
+                vrm=vrm,
+                vsa=vsa,
+                vra=vra,
+                ratio=br.tap,
+                b=br.br_b,
+                shift=br.shift,
+                gfrom=br.gs_from,
+                bfrom=br.bs_from,
+                gto=br.gs_to,
+                bto=br.bs_to,
+            )
+        else:
+            raise Exception(f"Branch {br.f_bus} {br.t_bus} has no flow meter")
+
+        if r is None or x is None:
+            dummy_p, dummy_q = open_branch_create_dummy_loads(base_mva, br, dummy_p, dummy_q, vrm, vsm)
+        else:
+            br.br_r = r
+            br.br_x = x
+            assert abs(x) > 0, f"{br.f_bus} {br.t_bus} has zero x"
+
+    for bus in mpc.bus:
+        bus.pd += dummy_p.get(bus.bus_i, 0)
+        bus.qd += dummy_q.get(bus.bus_i, 0)
+
+    return mpc.extract_main_island()
+
+
+def open_branch_create_dummy_loads(base_mva: int, br: Branch, dummy_p: defaultdict[Any, float],
+                                   dummy_q: defaultdict[Any, float], vrm: float, vsm: float):
+    br.br_status = 0
+    if br.flow_meter == FlowMeter.FROM:
+        dummy_p[br.f_bus] += br.flow_p - br.gs_from * vsm * vsm * base_mva
+        dummy_q[br.f_bus] += br.flow_q + br.bs_from * vsm * vsm * base_mva
+        dummy_p[br.t_bus] -= br.flow_p - br.loss_p + br.gs_to * vrm * vrm * base_mva
+        dummy_q[br.t_bus] -= br.flow_q - br.loss_q - br.bs_to * vrm * vrm * base_mva
+    else:
+        dummy_p[br.f_bus] += br.flow_p + br.loss_p - br.gs_from * vsm * vsm * base_mva
+        dummy_q[br.f_bus] += br.flow_q + br.loss_q + br.bs_from * vsm * vsm * base_mva
+        dummy_p[br.t_bus] -= br.flow_p + br.gs_to * vrm * vrm * base_mva
+        dummy_q[br.t_bus] -= br.flow_q - br.bs_to * vrm * vrm * base_mva
+
+    return dummy_p, dummy_q
 
 
 def test_case_into_line():
@@ -677,17 +782,17 @@ def test_case_from_extra():
 
 
 def test_case_into_line_zero_flow():
-    vsm = 0.97109
-    vrm = 0.97109
-    vsa = 11.351
-    vra = -18.649
+    vsm = 1.04501
+    vrm = 1.04504
+    vsa = -25.56
+    vra = -25.535
     ratio = 1.0
-    shift = 30
-    b = 0
-    ps = 0.02
-    qs = 0.04
-    gfrom = 0.0002
-    bfrom = -0.0004
+    shift = 0
+    b = 0.00227
+    ps = -431.62
+    qs = 1.26
+    gfrom = 0.0
+    bfrom = 0.0
     gto = 0
     bto = 0
 
@@ -707,9 +812,9 @@ def test_case_into_line_zero_flow():
         bto=bto,
     )
 
-    # print(f"Calculated R and X: {r_calc},{x_calc}")
-    r = 0.024
-    x = 0.34861
+    print(f"Calculated R and X: {r_calc},{x_calc}")
+    r = 0.0
+    x = 0.00001
     # assert math.isclose(r, r_calc, rel_tol=1e-2)
     # assert math.isclose(x, x_calc, rel_tol=1e-2)
 
@@ -719,8 +824,8 @@ def test_case_into_line_zero_flow():
         vsa=vsa,
         vra=vra,
         ratio=ratio,
-        r=r,
-        x=x,
+        r=r_calc,
+        x=x_calc,
         b_total=b,
         shift=shift,
         gfrom=gfrom,
@@ -733,97 +838,6 @@ def test_case_into_line_zero_flow():
     assert math.isclose(flow.q, qs, rel_tol=1e-2)
 
 
-def recalc_rx_based_on_flow(mpc: MatpowerCase, base_mva=100) -> MatpowerCase:
-    bus_vm = {b.bus_i: b.vm for b in mpc.bus}
-    bus_va = {b.bus_i: b.va for b in mpc.bus}
-    dummy_load_p = defaultdict(float)
-    dummy_load_q = defaultdict(float)
-    for br in mpc.branch:
-        vsm = bus_vm[br.f_bus]
-        vrm = bus_vm[br.t_bus]
-        vsa = bus_va[br.f_bus]
-        vra = bus_va[br.t_bus]
-        if vsm == vrm and vsa == vra + br.shift and br.br_r == 0 and br.br_x <= 0.0001:
-            br.br_status = 0
-            if br.flow_meter == FlowMeter.FROM:
-                dummy_load_p[br.f_bus] += br.flow_p - br.gs_from * vsm * vsm * base_mva
-                dummy_load_q[br.f_bus] += br.flow_q + br.bs_from * vsm * vsm * base_mva
-                dummy_load_p[br.t_bus] -= br.flow_p - br.loss_p + br.gs_to * vrm * vrm * base_mva
-                dummy_load_q[br.t_bus] -= br.flow_q - br.loss_q - br.bs_to * vrm * vrm * base_mva
-            else:
-                dummy_load_p[br.f_bus] += br.flow_p + br.loss_p - br.gs_from * vsm * vsm * base_mva
-                dummy_load_q[br.f_bus] += br.flow_q + br.loss_q + br.bs_from * vsm * vsm * base_mva
-                dummy_load_p[br.t_bus] -= br.flow_p + br.gs_to * vrm * vrm * base_mva
-                dummy_load_q[br.t_bus] -= br.flow_q - br.bs_to * vrm * vrm * base_mva
-            continue
-
-        # if br.flow_p == 0 and br.flow_q == 0:
-        #     continue
-        try:
-            if br.flow_meter == FlowMeter.TO:
-                r, x = calculate_rx_by_pq_to_bus(
-                    pr=-br.flow_p,
-                    qr=-br.flow_q,
-                    vsm=vsm,
-                    vrm=vrm,
-                    vsa=vsa,
-                    vra=vra,
-                    ratio=br.tap,
-                    b=br.br_b,
-                    shift=br.shift,
-                    gfrom=br.gs_from,
-                    bfrom=br.bs_from,
-                    gto=br.gs_to,
-                    bto=br.bs_to,
-                    model=Model.MATPOWER,
-                )
-            elif br.flow_meter == FlowMeter.FROM:
-                r, x = calculate_rx_by_pq_from_bus(
-                    ps=br.flow_p,
-                    qs=br.flow_q,
-                    vsm=vsm,
-                    vrm=vrm,
-                    vsa=vsa,
-                    vra=vra,
-                    ratio=br.tap,
-                    b=br.br_b,
-                    shift=br.shift,
-                    gfrom=br.gs_from,
-                    bfrom=br.bs_from,
-                    gto=br.gs_to,
-                    bto=br.bs_to,
-                )
-            else:
-                raise Exception(f"Branch {br.f_bus} {br.t_bus} has no flow meter")
-            if x != 0 and np.isfinite(x) and np.isfinite(r):
-                br.br_r = 10 * x if abs(r) > 10 * abs(x) else r
-                if abs(x) >= 0.00001:
-                    br.br_x = x
-                elif x < 0:
-                    br.br_x = -0.00001
-                else:
-                    br.br_x = 0.00001
-        except:
-            # print(f"Branch {br.f_bus} {br.t_bus} cannot be solved")
-            br.br_status = 0
-            if br.flow_meter == FlowMeter.FROM:
-                dummy_load_p[br.f_bus] += br.flow_p - br.gs_from * vsm * vsm * base_mva
-                dummy_load_q[br.f_bus] += br.flow_q + br.bs_from * vsm * vsm * base_mva
-                dummy_load_p[br.t_bus] -= br.flow_p - br.loss_p + br.gs_to * vrm * vrm * base_mva
-                dummy_load_q[br.t_bus] -= br.flow_q - br.loss_q - br.bs_to * vrm * vrm * base_mva
-            else:
-                dummy_load_p[br.f_bus] += br.flow_p + br.loss_p - br.gs_from * vsm * vsm * base_mva
-                dummy_load_q[br.f_bus] += br.flow_q + br.loss_q + br.bs_from * vsm * vsm * base_mva
-                dummy_load_p[br.t_bus] -= br.flow_p + br.gs_to * vrm * vrm * base_mva
-                dummy_load_q[br.t_bus] -= br.flow_q - br.bs_to * vrm * vrm * base_mva
-
-    for bus in mpc.bus:
-        bus.pd += dummy_load_p.get(bus.bus_i, 0)
-        bus.qd += dummy_load_q.get(bus.bus_i, 0)
-
-    return mpc.extract_main_island()
-
-
 if __name__ == "__main__":
     # test_case_into_line()
     # test_case_from_line()
@@ -832,5 +846,5 @@ if __name__ == "__main__":
     # test_case_from_line_w_shunt()
     # test_case_into_line_w_shunt()
     # test_case_from_line_w_gshunt()
-    test_case_from_extra()
-    # test_case_into_line_zero_flow()
+    # test_case_from_extra()
+    test_case_into_line_zero_flow()
