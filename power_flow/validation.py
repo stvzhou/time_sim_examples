@@ -925,7 +925,7 @@ if __name__ == "__main__":
     violation_p = {v.id: v.p_mismatch for v in violations}
     violation_q = {v.id: v.q_mismatch for v in violations}
     for bus in mpc.bus:
-        # bus.pd -= violation_p.get(bus.bus_i, 0)
+        bus.pd -= violation_p.get(bus.bus_i, 0)
         bus.qd -= violation_q.get(bus.bus_i, 0)
 
     mpc.extract_main_island().to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
