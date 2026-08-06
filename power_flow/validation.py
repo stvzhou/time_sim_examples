@@ -28,6 +28,7 @@ from calc_rx import (
     Model,
     recalc_rx_based_on_flow,
 )
+from power_flow.matpow import FlowMeter
 
 # Ensure power_flow directory is in python path
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -121,29 +122,6 @@ class BusInfo:
 
 @dataclass
 class BusEnergyBalance:
-    """Detailed energy balance container for a single bus.
-
-    Maintains all connected injections and withdrawals:
-    - outgoing_flows: Branch flows leaving this bus at the 'from' end (MW, MVAr)
-    - incoming_flows: Branch flows entering this bus at the 'to' end (MW, MVAr)
-    - shunts: Shunt injections/withdrawals (MW, MVAr)
-    - facts: FACTS / Static Var Compensators injections (MW, MVAr)
-    - loads: Active and reactive power demand (MW, MVAr)
-    - generations: Generator output (MW, MVAr)
-    - hvdc: HVDC / DC line injections (MW, MVAr)
-
-    Attributes:
-        bus_id: Bus identifier
-        vm: Voltage magnitude (p.u.)
-        va: Voltage angle (degrees)
-        bus_type: MATPOWER bus type (1=PQ, 2=PV, 3=Slack, 4=Isolated)
-        base_kv: Base voltage (kV)
-        bus_area: Area number
-        zone: Loss zone
-        connected_component: Connected component index
-        synchronous_component: Synchronous component index
-    """
-
     bus_id: Union[int, str] = 0
     vm: float = 1.0
     va: float = 0.0
@@ -154,23 +132,15 @@ class BusEnergyBalance:
     connected_component: int = 0
     synchronous_component: int = 0
     outgoing_flows: Dict[Any, Flow] = field(default_factory=dict)
-    incoming_flows: Dict[Any, Flow] = field(default_factory=dict)
     shunts: Dict[Any, Flow] = field(default_factory=dict)
-    facts: Dict[Any, Flow] = field(default_factory=dict)
     loads: Dict[Any, Flow] = field(default_factory=dict)
     generations: Dict[Any, Flow] = field(default_factory=dict)
-    hvdc: Dict[Any, Flow] = field(default_factory=dict)
+    tara_bus_miss: Flow = None
 
     def total_outgoing_flow(self) -> Flow:
         """Sum of outgoing branch flows leaving this bus."""
         p = sum(f.p for f in self.outgoing_flows.values())
         q = sum(f.q for f in self.outgoing_flows.values())
-        return Flow(p, q)
-
-    def total_incoming_flow(self) -> Flow:
-        """Sum of incoming branch flows entering this bus."""
-        p = sum(f.p for f in self.incoming_flows.values())
-        q = sum(f.q for f in self.incoming_flows.values())
         return Flow(p, q)
 
     def total_gen(self) -> Flow:
@@ -189,18 +159,6 @@ class BusEnergyBalance:
         """Sum of shunt flows at this bus."""
         p = sum(f.p for f in self.shunts.values())
         q = sum(f.q for f in self.shunts.values())
-        return Flow(p, q)
-
-    def total_facts(self) -> Flow:
-        """Sum of FACTS flows at this bus."""
-        p = sum(f.p for f in self.facts.values())
-        q = sum(f.q for f in self.facts.values())
-        return Flow(p, q)
-
-    def total_hvdc(self) -> Flow:
-        """Sum of HVDC flows at this bus."""
-        p = sum(f.p for f in self.hvdc.values())
-        q = sum(f.q for f in self.hvdc.values())
         return Flow(p, q)
 
     def balance(self) -> Flow:
@@ -235,19 +193,8 @@ def calc_bus_balance(bus: BusEnergyBalance) -> Flow:
         p += flow.p
         q += flow.q
 
-    # Incoming branch flows (entering bus, subtracted from power leaving)
-    for flow in bus.incoming_flows.values():
-        p += flow.p
-        q += flow.q
-
     # Shunt injections (injected power reduces deficit, so subtracted)
     for flow in bus.shunts.values():
-        p -= flow.p
-        q -= flow.q
-
-    # FACTS / SVC injections
-    for flow in bus.facts.values():
-        p -= flow.p
         q -= flow.q
 
     # Loads (power demanded / leaving bus)
@@ -259,11 +206,6 @@ def calc_bus_balance(bus: BusEnergyBalance) -> Flow:
     for flow in bus.generations.values():
         p -= flow.p
         q -= flow.q
-
-    # HVDC line flows
-    for flow in bus.hvdc.values():
-        p += flow.p
-        q += flow.q
 
     return Flow(p, q)
 
@@ -389,7 +331,7 @@ def get_bus_loads(
 
 
 def get_shunts(
-        case: Any, id_to_bus: Dict[Union[int, str], BusEnergyBalance]
+        case: Any, id_to_bus: Dict[Union[int, str], BusEnergyBalance], base_mva=100
 ) -> Dict[Union[int, str], BusEnergyBalance]:
     """Populate shunt active and reactive power flows into id_to_bus.
 
@@ -419,37 +361,6 @@ def get_shunts(
                 id_to_bus[b.bus_i].shunts[f"shunt_{idx}"] = Flow(p_inj, q_inj)
 
     return id_to_bus
-
-
-def print_branch_flows(bus: BusEnergyBalance, branches):
-    rows = []
-    for br, flow in bus.outgoing_flows.items():
-        idx = int(br.split("_")[1])
-        rows.append(
-            {
-                "from_bus": branches[idx].f_bus,
-                "to_bus": branches[idx].t_bus,
-                "p": flow.p,
-                "q": flow.q,
-                "r": branches[idx].br_r,
-                "x": branches[idx].br_x,
-            }
-        )
-    for br, flow in bus.incoming_flows.items():
-        idx = int(br.split("_")[1])
-        rows.append(
-            {
-                "from_bus": branches[idx].f_bus,
-                "to_bus": branches[idx].t_bus,
-                "p": -flow.p,
-                "q": -flow.q,
-                "r": branches[idx].br_r,
-                "x": branches[idx].br_x,
-            }
-        )
-
-    result = pd.DataFrame(rows)
-    print(result.to_string(index=False))
 
 
 def get_branch_flows(
@@ -556,6 +467,15 @@ def get_hvdc_flow(
     return id_to_bus
 
 
+def get_bus_miss(
+        case: Any, id_to_bus: Dict[Union[int, str], BusEnergyBalance]
+) -> Dict[Union[int, str], BusEnergyBalance]:
+    for idx, flow in case.bus_miss.items():
+        id_to_bus[idx].tara_bus_miss = case.bus_miss[idx]
+
+    return id_to_bus
+
+
 def build_bus_energy_balances(case: Any) -> Dict[Union[int, str], BusEnergyBalance]:
     """Construct complete BusEnergyBalance mapping for all buses in a MATPOWER case.
 
@@ -579,6 +499,8 @@ def build_bus_energy_balances(case: Any) -> Dict[Union[int, str], BusEnergyBalan
     id_to_bus = get_shunts(case, id_to_bus)
     id_to_bus = get_branch_flows(case, id_to_bus)
     id_to_bus = get_hvdc_flow(case, id_to_bus)
+    id_to_bus = get_bus_miss(case, id_to_bus)
+
     return id_to_bus
 
 
@@ -951,22 +873,86 @@ def find_bus_balance_violations(
     return violations
 
 
+def get_single_branch_flow(branch: Branch, id_to_bus: Dict[Union[int, str], BusEnergyBalance], base_mva=100) -> Flow:
+    if not branch.is_in_service:
+        return Flow(0, 0)
+    fb = branch.f_bus
+    tb = branch.t_bus
+
+    vsm = id_to_bus[fb].vm
+    vsa = id_to_bus[fb].va
+    vrm = id_to_bus[tb].vm
+    vra = id_to_bus[tb].va
+
+    if branch.flow_meter == FlowMeter.FROM:
+        return calc_flow_from_bus(
+            vsm=vsm,
+            vrm=vrm,
+            vsa=vsa,
+            vra=vra,
+            r=branch.br_r,
+            x=branch.br_x,
+            b_total=branch.br_b,
+            shift=branch.shift,
+            base_mva=base_mva,
+            ratio=branch.tap,
+        )
+    else:
+        return calc_flow_to_bus(
+            vsm=vsm,
+            vrm=vrm,
+            vsa=vsa,
+            vra=vra,
+            r=branch.br_r,
+            x=branch.br_x,
+            b_total=branch.br_b,
+            shift=branch.shift,
+            base_mva=base_mva,
+            ratio=branch.tap,
+        )
+
+
+def print_branch_flows(bus: BusEnergyBalance, branches):
+    rows = []
+    for br, flow in bus.outgoing_flows.items():
+        idx = int(br.split("_")[1])
+        rows.append(
+            {
+                "from_bus": branches[idx].f_bus,
+                "to_bus": branches[idx].t_bus,
+                "p": flow.p,
+                "tara_p": branches[idx].flow_p,
+                "q": flow.q,
+                "tara_q": branches[idx].flow_q,
+                "r": branches[idx].br_r,
+                "x": branches[idx].br_x,
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    print(result.to_string(index=False))
+    print("Total p: ", result["p"].sum(), "Tara p: ", result["tara_p"].sum())
+    print("Total q: ", result["q"].sum(), "Tara q: ", result["tara_q"].sum())
+
+
 def print_bus_balance_summary(
         id_to_bus: Dict[Union[int, str], BusEnergyBalance],
+        branches: List[Branch],
+        sort_by="p",
         top_n: int = 10,
         p_tol: float = 1e-3,
         q_tol: float = 1e-3,
 ) -> None:
     """Print an interactive table of the top mismatched buses."""
     violations = find_bus_balance_violations(
-        id_to_bus, p_tol=p_tol, q_tol=q_tol, top_n=top_n, sort_by="p"
+        id_to_bus, p_tol=p_tol, q_tol=q_tol, top_n=top_n, sort_by=sort_by
     )
 
     print("\n" + "=" * 140)
     print(f"{'TOP BUS ENERGY BALANCE MISMATCHES':^140}")
     print("=" * 140)
     print(
-        f"{'Bus ID':>10} | {'Type':<6} | {'Vm (pu)':>7} | {'Va (deg)':>8} | {'P Mismatch (MW)':>16} | {'Q Mismatch (MVAr)':>18} | {'Flow':>10} | {'Gen':>10} | {'Load':>10} | {'Shunt':>10} | {'Facts':>10} | {'Hvdc':>10}"
+        f"{'Bus ID':>10} | {'Type':<6} | {'Vm (pu)':>7} | {'Va (deg)':>8} | {'P Mismatch (MW)':>16} | {'Q Mismatch (MVAr)':>18} | {'Flow':>10} | {'Gen':>10} | {'Load':>10} | {'Shunt':>10} | {'Tara Miss':>10}"
     )
     print("-" * 140)
 
@@ -974,18 +960,35 @@ def print_bus_balance_summary(
     for v in violations:
         t_str = type_map.get(v.bus_type, str(v.bus_type))
         bus = id_to_bus[v.id]
-        flow = sum([f.p for f in bus.incoming_flows.values()]) - sum(
+        flow_p = - sum(
             [f.p for f in bus.outgoing_flows.values()]
         )
-        gen = sum([f.p for f in bus.generations.values()])
-        load = sum([f.p for f in bus.loads.values()])
-        shunt = sum([f.p for f in bus.shunts.values()])
-        facts = sum([f.p for f in bus.facts.values()])
-        hvdc = sum([f.p for f in bus.hvdc.values()])
+        flow_q = - sum(
+            [f.q for f in bus.outgoing_flows.values()]
+        )
+        flow = f"{f'{int(flow_p)}, {int(flow_q)}':>10}"
+        gen_p = sum([f.p for f in bus.generations.values()])
+        gen_q = sum([f.q for f in bus.generations.values()])
+        gen = f"{f'{int(gen_p)}, {int(gen_q)}':>10}"
+        load_p = sum([f.p for f in bus.loads.values()])
+        load_q = sum([f.q for f in bus.loads.values()])
+        load = f"{f'{int(load_p)}, {int(load_q)}':>10}"
+        shunt_q = sum([f.q for f in bus.shunts.values()])
+        shunt_p = sum([f.p for f in bus.shunts.values()])
+        shunt = f"{f'{int(shunt_p)}, {int(shunt_q)}':>10}"
+
+        miss_p = bus.tara_bus_miss.p if bus.tara_bus_miss else 0.0
+        miss_q = bus.tara_bus_miss.q if bus.tara_bus_miss else 0.0
+        miss = f"{f'{int(miss_p)}, {int(miss_q)}':>10}"
+
         print(
-            f"{v.id:>10} | {t_str:<6} | {v.v_mag:>7.4f} | {v.v_angle:>8.2f} | {v.p_mismatch:>16.4f} | {v.q_mismatch:>18.4f} | {flow:>10.0f} | {gen:>10.0f} | {load:>10.0f} | {shunt:>10.0f} | {facts:>10.0f} | {hvdc:>10.0f}"
+            f"{v.id:>10} | {t_str:<6} | {v.v_mag:>7.4f} | {v.v_angle:>8.2f} | {v.p_mismatch:>16.4f} | {v.q_mismatch:>18.4f} | {flow} | {gen} | {load} | {shunt} | {miss}"
         )
     print("=" * 140 + "\n")
+    print_branch_flows(id_to_bus[violations[0].id], branches)
+    print(id_to_bus[violations[0].id])
+
+    print("\n" + "=" * 140)
 
 
 def print_branch_large_flows(
@@ -993,8 +996,6 @@ def print_branch_large_flows(
 ):
     branches = {}
     for bus in id_to_bus.values():
-        for br, flow in bus.incoming_flows.items():
-            branches[br] = flow.p
         for br, flow in bus.outgoing_flows.items():
             branches[br] = -flow.p
     branches = dict(sorted(branches.items(), key=lambda x: x[1], reverse=True))
@@ -1027,8 +1028,7 @@ def validate_matpower_energy_balance(
         case: Any,
         p_tol: float = 1e-3,
         q_tol: float = 1e-3,
-        verbose: bool = True,
-) -> Tuple[bool, ValidationReport, Dict[Union[int, str], BusEnergyBalance]]:
+) -> List[Any]:
     """Validate active and reactive power balance across all buses in a MATPOWER case.
 
     Args:
@@ -1137,12 +1137,12 @@ def validate_matpower_energy_balance(
         violations=violations[:20],
     )
 
-    if verbose:
-        print(report.summary())
-        if violations:
-            print_bus_balance_summary(id_to_bus, top_n=10, p_tol=p_tol, q_tol=q_tol)
+    print(report.summary())
+    if violations:
+        print_bus_balance_summary(id_to_bus, case.branch, top_n=30, p_tol=p_tol, q_tol=q_tol, sort_by="p")
+        print_bus_balance_summary(id_to_bus, case.branch, top_n=30, p_tol=p_tol, q_tol=q_tol, sort_by="q")
 
-    return is_balanced, report, id_to_bus
+    return violations
 
 
 def set_gen_bus_to_pv(mpc: MatpowerCase) -> MatpowerCase:
@@ -1311,6 +1311,11 @@ if __name__ == "__main__":
     tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
     mpc = MatpowerCase.from_tara(tara_file_dir)
     mpc = mpc.extract_main_island()
+    # for br in mpc.branch:
+    #     if abs(br.br_x) < 0.00001:
+    #         br.br_x = 0.00001
+    #     if abs(br.br_r) > 10 * abs(br.br_r):
+    #         br.br_r = 10 * br.br_x
     mpc = recalc_rx_based_on_flow(mpc)
 
     # id_to_bus = build_bus_energy_balances(mpc)
@@ -1321,15 +1326,31 @@ if __name__ == "__main__":
 
     # Re-evaluate energy balance after topology updates
     id_to_bus = build_bus_energy_balances(mpc)
-    balanced, rep, _ = validate_matpower_energy_balance(
-        mpc, p_tol=1.0, q_tol=1.0, verbose=True
+    violations = validate_matpower_energy_balance(
+        mpc, p_tol=0.0001, q_tol=0.0001
     )
-    # print_branch_large_flows(id_to_bus, mpc, top_n=10)
-    print_branch_flows(id_to_bus[615600], mpc.branch)
+
+    print("Max X: ", max([abs(b.br_x) for b in mpc.branch]))
+    print("Min X: ", min([abs(b.br_x) for b in mpc.branch]))
+    print("Max R: ", max([abs(b.br_r) for b in mpc.branch]))
+    print("Min R: ", min([abs(b.br_r) for b in mpc.branch]))
+    print("Max R/X", max([abs(b.br_r / b.br_x) for b in mpc.branch]))
+
+    violation_p = {v.id: v.p_mismatch for v in violations}
+    violation_q = {v.id: v.q_mismatch for v in violations}
+    for bus in mpc.bus:
+        bus.pd -= violation_p.get(bus.bus_i, 0)
+        bus.qd -= violation_q.get(bus.bus_i, 0)
 
     # from scipy.io import savemat
 
-    # mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
+    mpc.extract_main_island().to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
+    mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
+
+    id_to_bus = build_bus_energy_balances(mpc)
+    validate_matpower_energy_balance(
+        mpc, p_tol=0.0001, q_tol=0.0001
+    )
 
     from pypower.api import runpf, rundcpf
     from pypower.ppoption import ppoption

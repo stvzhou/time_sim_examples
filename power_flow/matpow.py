@@ -39,83 +39,15 @@ class FlowMeter(Enum):
     TO = "T"
 
 
-# =============================================================================
-# MATPOWER Column Index Constants (MATPOWER 5.0 specification)
-# =============================================================================
+from pypower.idx_bus import BUS_I, BUS_TYPE, PD, QD, GS, BS, BUS_AREA, VM, VA, BASE_KV, ZONE, VMAX, VMIN, LAM_P, LAM_Q, \
+    MU_VMAX, MU_VMIN
+from pypower.idx_brch import F_BUS, T_BUS, BR_R, BR_X, BR_B, RATE_A, RATE_B, RATE_C, TAP, SHIFT, BR_STATUS, ANGMIN, \
+    ANGMAX, PF, QF, PT, QT, MU_SF, MU_ST, MU_ANGMIN, MU_ANGMAX
+from pypower.idx_gen import GEN_BUS, PG, QG, QMAX, QMIN, VG, MBASE, GEN_STATUS, PMAX, PMIN, PC1, PC2, QC1MIN, QC1MAX, \
+    QC2MIN, QC2MAX, RAMP_AGC, RAMP_10, RAMP_30, RAMP_Q, APF, MU_PMAX, MU_PMIN, MU_QMAX, MU_QMIN
 
-# Bus matrix column indices (0-indexed)
-BUS_I = 0  # bus number (1 to 29997)
-BUS_TYPE = 1  # bus type (1 = PQ, 2 = PV, 3 = ref/slack, 4 = isolated)
-PD = 2  # real power demand (MW)
-QD = 3  # reactive power demand (MVAr)
-GS = 4  # shunt conductance (MW demanded at V = 1.0 p.u.)
-BS = 5  # shunt susceptance (MVAr injected at V = 1.0 p.u.)
-BUS_AREA = 6  # area number (1 to 100)
-VM = 7  # voltage magnitude (p.u.)
-VA = 8  # voltage angle (degrees)
-BASE_KV = 9  # base voltage (kV)
-ZONE = 10  # loss zone (1 to 999)
-VMAX = 11  # maximum voltage magnitude (p.u.)
-VMIN = 12  # minimum voltage magnitude (p.u.)
-LAM_P = 13  # Lagrange multiplier on real power mismatch (u/MW)
-LAM_Q = 14  # Lagrange multiplier on reactive power mismatch (u/MVAr)
-MU_VMAX = 15  # Kuhn-Tucker multiplier on upper voltage limit (u/p.u.)
-MU_VMIN = 16  # Kuhn-Tucker multiplier on lower voltage limit (u/p.u.)
 
 # Generator matrix column indices (0-indexed)
-GEN_BUS = 0  # bus number
-PG = 1  # real power output (MW)
-QG = 2  # reactive power output (MVAr)
-QMAX = 3  # maximum reactive power output (MVAr)
-QMIN = 4  # minimum reactive power output (MVAr)
-VG = 5  # voltage magnitude setpoint (p.u.)
-MBASE = 6  # total MVA base of this machine, defaults to baseMVA
-GEN_STATUS = 7  # machine status, > 0 = in-service, <= 0 = out-of-service
-PMAX = 8  # maximum real power output (MW)
-PMIN = 9  # minimum real power output (MW)
-PC1 = 10  # lower real power output of PQ capability curve (MW)
-PC2 = 11  # upper real power output of PQ capability curve (MW)
-QC1MIN = 12  # minimum reactive power output at PC1 (MVAr)
-QC1MAX = 13  # maximum reactive power output at PC1 (MVAr)
-QC2MIN = 14  # minimum reactive power output at PC2 (MVAr)
-QC2MAX = 15  # maximum reactive power output at PC2 (MVAr)
-RAMP_AGC = 16  # ramp rate for load following/AGC (MW/min)
-RAMP_10 = 17  # ramp rate for 10 minute reserves (MW)
-RAMP_30 = 18  # ramp rate for 30 minute reserves (MW)
-RAMP_Q = 19  # ramp rate for reactive power (2 sec reserve) (MVAr/min)
-APF = 20  # area participation factor
-MU_PMAX = 21  # Kuhn-Tucker multiplier on upper Pg limit (u/MW)
-MU_PMIN = 22  # Kuhn-Tucker multiplier on lower Pg limit (u/MW)
-MU_QMAX = 23  # Kuhn-Tucker multiplier on upper Qg limit (u/MVAr)
-MU_QMIN = 24  # Kuhn-Tucker multiplier on lower Qg limit (u/MVAr)
-
-# Branch matrix column indices (0-indexed)
-F_BUS = 0  # "from" bus number
-T_BUS = 1  # "to" bus number
-BR_R = 2  # resistance (p.u.)
-BR_X = 3  # reactance (p.u.)
-BR_B = 4  # total line charging susceptance (p.u.)
-RATE_A = 5  # MVA rating A (long term rating)
-RATE_B = 6  # MVA rating B (short term rating)
-RATE_C = 7  # MVA rating C (emergency rating)
-TAP = 8  # transformer off-nominal turns ratio (0 for lines)
-SHIFT = 9  # transformer phase shift angle (degrees)
-BR_STATUS = 10  # branch status, 1 = in-service, 0 = out-of-service
-ANGMIN = 11  # minimum angle difference, angle(Vf) - angle(Vt) (deg)
-ANGMAX = 12  # maximum angle difference, angle(Vf) - angle(Vt) (deg)
-PF = 13  # real power injected at "from" bus end (MW)
-QF = 14  # reactive power injected at "from" bus end (MVAr)
-PT = 15  # real power injected at "to" bus end (MW)
-QT = 16  # reactive power injected at "to" bus end (MVAr)
-MU_SF = 17  # Kuhn-Tucker multiplier on MVA limit at "from" bus (u/MVA)
-MU_ST = 18  # Kuhn-Tucker multiplier on MVA limit at "to" bus (u/MVA)
-MU_ANGMIN = 19  # Kuhn-Tucker multiplier on lower angle diff limit (u/deg)
-MU_ANGMAX = 20  # Kuhn-Tucker multiplier on upper angle diff limit (u/deg)
-
-
-# =============================================================================
-# Bus Class
-# =============================================================================
 
 
 @dataclass
@@ -187,21 +119,21 @@ class Bus:
 
     def to_list(self, include_opf: bool = False) -> List[float]:
         """Convert to MATPOWER standard bus row list."""
-        row = [
-            float(self.bus_i),
-            float(self.bus_type),
-            float(self.pd),
-            float(self.qd),
-            float(self.gs),
-            float(self.bs),
-            float(self.bus_area),
-            float(self.vm),
-            float(self.va),
-            float(self.base_kv),
-            float(self.zone),
-            float(self.vmax),
-            float(self.vmin),
-        ]
+        row = [0] * 13
+        row[BUS_I] = int(self.bus_i)
+        row[BUS_TYPE] = int(self.bus_type)
+        row[PD] = float(self.pd)
+        row[QD] = float(self.qd)
+        row[GS] = float(self.gs)
+        row[BS] = float(self.bs)
+        row[BUS_AREA] = float(self.bus_area)
+        row[VM] = float(self.vm)
+        row[VA] = float(self.va)
+        row[BASE_KV] = float(self.base_kv)
+        row[ZONE] = float(self.zone)
+        row[VMAX] = float(self.vmax)
+        row[VMIN] = float(self.vmin)
+
         if include_opf:
             row.extend(
                 [
@@ -311,29 +243,29 @@ class Generator:
 
     def to_list(self, include_opf: bool = False) -> List[float]:
         """Convert to MATPOWER standard gen row list."""
-        row = [
-            float(self.gen_bus),
-            float(self.pg),
-            float(self.qg),
-            float(self.qmax),
-            float(self.qmin),
-            float(self.vg),
-            float(self.mbase),
-            float(self.gen_status),
-            float(self.pmax),
-            float(self.pmin),
-            float(self.pc1),
-            float(self.pc2),
-            float(self.qc1min),
-            float(self.qc1max),
-            float(self.qc2min),
-            float(self.qc2max),
-            float(self.ramp_agc),
-            float(self.ramp_10),
-            float(self.ramp_30),
-            float(self.ramp_q),
-            float(self.apf),
-        ]
+        row = [0] * 21
+        row[GEN_BUS] = int(self.gen_bus)
+        row[PG] = float(self.pg)
+        row[QG] = float(self.qg)
+        row[QMAX] = float(self.qmax)
+        row[QMIN] = float(self.qmin)
+        row[VG] = float(self.vg)
+        row[MBASE] = float(self.mbase)
+        row[GEN_STATUS] = int(self.gen_status)
+        row[PMAX] = float(self.pmax)
+        row[PMIN] = float(self.pmin)
+        row[PC1] = float(self.pc1)
+        row[PC2] = float(self.pc2)
+        row[QC1MIN] = float(self.qc1min)
+        row[QC1MAX] = float(self.qc1max)
+        row[QC2MIN] = float(self.qc2min)
+        row[QC2MAX] = float(self.qc2max)
+        row[RAMP_AGC] = float(self.ramp_agc)
+        row[RAMP_10] = float(self.ramp_10)
+        row[RAMP_30] = float(self.ramp_30)
+        row[RAMP_Q] = float(self.ramp_q)
+        row[APF] = float(self.apf)
+
         if include_opf:
             row.extend(
                 [
@@ -462,21 +394,21 @@ class Branch:
 
     def to_list(self, include_results: bool = False) -> List[float]:
         """Convert to MATPOWER standard branch row list."""
-        row = [
-            float(self.f_bus),
-            float(self.t_bus),
-            float(self.br_r),
-            float(self.br_x),
-            float(self.br_b),
-            float(self.rate_a),
-            float(self.rate_b),
-            float(self.rate_c),
-            float(self.tap),
-            float(self.shift),
-            float(self.br_status),
-            float(self.angmin),
-            float(self.angmax),
-        ]
+        row = [0] * 13
+        row[F_BUS] = int(self.f_bus)
+        row[T_BUS] = int(self.t_bus)
+        row[BR_R] = float(self.br_r)
+        row[BR_X] = float(self.br_x)
+        row[BR_B] = float(self.br_b)
+        row[RATE_A] = float(self.rate_a)
+        row[RATE_B] = float(self.rate_b)
+        row[RATE_C] = float(self.rate_c)
+        row[TAP] = float(self.tap)
+        row[SHIFT] = float(self.shift)
+        row[BR_STATUS] = int(self.br_status)
+        row[ANGMIN] = float(self.angmin)
+        row[ANGMAX] = float(self.angmax)
+
         if include_results:
             row.extend(
                 [
@@ -718,6 +650,56 @@ def parse_multiterminal_dc(file_path: str) -> dict:
     return result
 
 
+def parse_single_hvdc(lines: List[str]) -> dict:
+    csv_data = "\n".join(lines)
+    data = pd.read_csv(StringIO(csv_data))
+    data.columns = data.columns.str.strip()
+    bus = int(data["Bus#"].iloc[0])
+    data = data.iloc[1:]
+    data = data[pd.isna(data["BTyp"]) & (~pd.isna(data["Bus#"])) & (~pd.isna(data["MW"]))]
+    return {bus: {
+        "p": data["MW"].astype(float).sum(),
+        "q": data["MVAR"].astype(float).sum(),
+    }}
+
+
+def parse_hvdc(file_path: str) -> dict:
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    idx = 0
+    result = {}
+    while idx < len(lines):
+        if "Multi-Terminal DC" in lines[idx]:
+            break
+        line = lines[idx]
+        if " ******************* Detailed bus flow analysis" in line:
+            single_record = []
+            idx += 1
+            while idx < len(lines) - 1 and "Generator Voltage" not in lines[idx] and "Shunt Voltage" not in lines[
+                idx] and " ******************* Detailed bus flow analysis" not in lines[
+                idx + 1]:
+                single_record.append(lines[idx])
+                idx += 1
+            result = result | parse_single_hvdc(single_record)
+
+        idx += 1
+
+    return result
+
+
+@dataclass
+class Flow:
+    """Active (P) and Reactive (Q) power flow representation.
+
+    Attributes:
+        p: Active power (MW)
+        q: Reactive power (MVAr)
+    """
+
+    p: float = 0.0
+    q: float = 0.0
+
+
 @dataclass
 class MatpowerCase:
     """MATPOWER 5.0 Case container holding baseMVA, bus, gen, and branch matrices.
@@ -738,6 +720,7 @@ class MatpowerCase:
     branch: List[Branch] = field(default_factory=list)
     gencost: Optional[np.ndarray] = None
     star_buses: Dict[int, List[int]] = field(default_factory=lambda: {})
+    bus_miss: Dict[int, Flow] = field(default_factory=lambda: {})
 
     def to_dict(self) -> Dict[str, Any]:
         """Export case as standard MATPOWER dictionary with numpy matrices."""
@@ -1247,27 +1230,38 @@ class MatpowerCase:
         gen = pd.read_csv(os.path.join(file_dir, "GenData.csv"), skiprows=9)
         branch = pd.read_csv(os.path.join(file_dir, "BranchData.csv"), skiprows=9)
         vsc = pd.read_csv(os.path.join(file_dir, "VSCData.csv"), skiprows=9)
+        shunts = pd.read_csv(os.path.join(file_dir, "ShuntData.csv"), skiprows=9)
+        bus_mis = pd.read_csv(os.path.join(file_dir, "BusMism.csv"), skiprows=9)
         bus.columns = bus.columns.str.strip()
         load.columns = load.columns.str.strip()
         gen.columns = gen.columns.str.strip()
         branch.columns = branch.columns.str.strip()
         vsc.columns = vsc.columns.str.strip()
+        shunts.columns = shunts.columns.str.strip()
+        bus_mis.columns = bus_mis.columns.str.strip()
 
         multi_term_dc_loads = parse_multiterminal_dc(os.path.join(file_dir, "DCLineBusFlows.csv"))
+        hvdc_loads = parse_hvdc(os.path.join(file_dir, "DCLineBusFlows.csv"))
+
         load = load[load["St"] == 1]
-        load["P"] = load["Pconst"] + load["Pcurrt"] + load["PAdmit"]
-        load["Q"] = load["Qconst"] + load["Qcurrt"] + load["QAdmit"]
+        load["P"] = load["ActLoad"]
+        load["Q"] = load["Qconst"] + load["Qcurrt"] - load["QAdmit"]
         bus_p = load.groupby("Bus#")["P"].sum().to_dict()
         bus_q = load.groupby("Bus#")["Q"].sum().to_dict()
 
         hvdc_p = defaultdict(float)
         hvdc_q = defaultdict(float)
-        for _, b in branch.iterrows():
-            if pd.isna(b["X"]) and int(b["St"]) == 1:
-                hvdc_p[b["Fr Bus"]] += b["MW_Flow"] + b["LossesMW"]
-                hvdc_q[b["Fr Bus"]] += b["MVAr_flow"]
-                hvdc_p[b["To Bus"]] -= b["MW_Flow"]
-                hvdc_q[b["To Bus"]] -= b["MVAr_flow"]
+        for bus_id, flow in hvdc_loads.items():
+            hvdc_p[bus_id] += flow["p"]
+            hvdc_q[bus_id] += flow["q"]
+
+        # for _, b in branch.iterrows():
+        #     if pd.isna(b["X"]) and int(b["St"]) == 1:
+        #         hvdc_p[b["Fr Bus"]] += b["MW_Flow"]
+        #         hvdc_q[b["Fr Bus"]] += b["MVAr_flow"]
+        #         hvdc_p[b["To Bus"]] -= b["MW_Flow"] - b["LossesMW"]
+        #         hvdc_q[b["To Bus"]] -= b["MVAr_flow"]
+
         vsc_lines = {(b["Bus#"], b["Bus#.1"]) for _, b in vsc.iterrows()}
         # for _, b in vsc.iterrows():
         #     if b["Status"] == 0:
@@ -1301,11 +1295,15 @@ class MatpowerCase:
                         b["ShuntBTo"] * v_square.get(b["To Bus"], 1) * base_mva
                 )
 
+        shunts = shunts[shunts["Status"] == 1]
+        shunt_to_q = shunts.groupby("Bus#")["ShuntMVar"].sum().to_dict()
+        shunt_to_p = shunts.groupby("Bus#")["ShuntMW"].sum().to_dict()
+
         mat_buses: List[Bus] = []
         for _, b in bus.iterrows():
-            bs = b["BShntOn"]
+            bs = shunt_to_q.get(b["Bus#"], 0) / (b["Vmag [PU]"] ** 2)
             if b["BTyp"] == "LOAD":
-                bs += -b["QGen"]
+                bs += -b["QGen"] / (b["Vmag [PU]"] ** 2)
             mat_buses.append(
                 Bus(
                     bus_i=b["Bus#"],
@@ -1316,7 +1314,7 @@ class MatpowerCase:
                     qd=bus_q.get(b["Bus#"], 0)
                        + hvdc_q.get(b["Bus#"], 0)
                        + line_shunts_q.get(b["Bus#"], 0),
-                    gs=b["GShntOn"],
+                    gs=shunt_to_p.get(b["Bus#"], 0) / (b["Vmag [PU]"] ** 2),
                     bs=bs,
                     bus_area=b["Area"],
                     vm=b["Vmag [PU]"],
@@ -1327,7 +1325,7 @@ class MatpowerCase:
                     vmin=0.5,
                 )
             )
-
+        bus_to_va = {b.bus_i: b.va for b in mat_buses}
         mat_gens: List[Generator] = []
         for _, g in gen.iterrows():
             mat_gens.append(
@@ -1337,7 +1335,7 @@ class MatpowerCase:
                     qg=g["QGen"],
                     qmax=g["Qmax"],
                     qmin=g["Qmin"],
-                    vg=g["VoltTarg"],
+                    vg=bus_to_va.get(g["Vg"], 1.0),
                     mbase=base_mva,
                     gen_status=g["Sta"],
                     pmax=g["Pmax"],
@@ -1353,12 +1351,14 @@ class MatpowerCase:
             ratio = float(b["TranRat"])
             if ratio == 0:
                 ratio = 1
+            r = float(b["R"])
+            x = float(b["X"])
             mat_branches.append(
                 Branch(
                     f_bus=b["Fr Bus"],
                     t_bus=b["To Bus"],
-                    br_r=float(b["R"]),
-                    br_x=float(b["X"]),
+                    br_r=r,
+                    br_x=x if x != 0 else 0.00001,
                     br_b=float(b["Charg"]),
                     rate_a=float(b["RateA"]),
                     rate_b=float(b["RateB"]),
@@ -1378,12 +1378,20 @@ class MatpowerCase:
                 )
             )
 
+        bus_miss = {}
+        for _, row in bus_mis.iterrows():
+            bus_miss[row["Bus#"]] = Flow(
+                p=float(row["PMism"]),
+                q=float(row["QMism"]),
+            )
+
         return cls(
             version="2",
             baseMVA=base_mva,
             bus=[b for b in mat_buses if b.bus_type != 4],
             gen=[g for g in mat_gens if g.gen_status == 1],
             branch=[b for b in mat_branches if b.br_status == 1],
+            bus_miss=bus_miss,
         )
 
     def summary(self) -> Dict[str, Any]:
@@ -1434,7 +1442,7 @@ class MatpowerCase:
         for br in self.branch:
             if br.br_status > 0 and br.f_bus in G and br.t_bus in G:
                 G.add_edge(br.f_bus, br.t_bus)
-        slack_buses = set(b.bus_i for b in self.bus if b.bus_type == 3)
+
         main_island = max(nx.connected_components(G), key=len)
 
         return MatpowerCase(
@@ -1446,7 +1454,9 @@ class MatpowerCase:
                 br
                 for br in self.branch
                 if br.f_bus in main_island and br.t_bus in main_island
+                   and br.br_status
             ],
+            bus_miss={k: v for k, v in self.bus_miss.items() if k in main_island},
         )
 
 
@@ -1459,7 +1469,7 @@ if __name__ == "__main__":
     import sys
 
     tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
-    # mpc = MatpowerCase.from_tara(tara_file_dir)
+    mpc = MatpowerCase.from_tara(tara_file_dir)
     # for key, val in mpc.summary().items():
     #     print(f"{key}: {val}")
     #
@@ -1471,4 +1481,5 @@ if __name__ == "__main__":
     # )
     # for key, val in main_island.summary().items():
     #     print(f"{key}: {val}")
-    parse_multiterminal_dc(tara_file_dir + "DCLineBusFlows.csv")
+    # parse_hvdc(tara_file_dir + "DCLineBusFlows.csv")
+    pass
