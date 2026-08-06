@@ -21,7 +21,7 @@ def validate_case(mpc: MatpowerCase):
     assert all(np.isfinite(b.br_r) for b in mpc.branch), "Branch r is invalid"
 
 
-mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
+mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/pjm.mat")
 # id_to_bus = build_bus_energy_balances(mpc)
 # validate_matpower_energy_balance(
 #     mpc, p_tol=0.0001, q_tol=0.0001
@@ -34,7 +34,7 @@ ppc = mpc.to_dict()
 ppopt = ppoption(
     MODEL="AC",  # AC power flow model
     PF_ALG=1,  # 1 = Newton-Raphson ('NR')
-    PF_TOL=1e-4,  # Convergence tolerance
+    PF_TOL=1e-6,  # Convergence tolerance
     PF_MAX_IT=40,  # Maximum iteration limit
     ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
     OUT_ALL=0,  # Do not print bus/branch/gen result tables

@@ -1,15 +1,3 @@
-"""Bus energy balance validation for MATPOWER data structures.
-
-Follows the energy balance validation pattern in psbl.py adapted for MATPOWER 5.0 case format:
-- Flow dataclass for (P, Q) active and reactive power
-- BusEnergyBalance dataclass for per-bus tracking of all connected injections/withdrawals
-- calc_flow_into_branch / calc_flow_from_branch for transmission lines and transformers (with tap and phase shift)
-- calc_bus_balance for net nodal (P, Q) mismatch evaluation
-- Data extraction from MATPOWER data structures (MatpowerCase, dict, numpy matrices)
-- Low impedance branch detection, short-circuit bus identification, and topology aggregation
-- Validation routines, summary reports, and violation detection
-"""
-
 from __future__ import annotations
 
 import math
@@ -27,7 +15,7 @@ from calc_rx import (
     recalc_rx_based_on_flow,
 )
 from power_flow.matpow import FlowMeter, BusEnergyBalance
-from merge_zbr import merge_zero_impedance_branches
+from extract_areas import extract_areas, PJM_AREAS
 
 # Ensure power_flow directory is in python path
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -609,9 +597,9 @@ def print_branch_flows(bus: BusEnergyBalance, branches):
             {
                 "from_bus": branches[idx].f_bus,
                 "to_bus": branches[idx].t_bus,
-                "p": flow.p,
+                "p": round(flow.p, 1),
                 "tara_p": branches[idx].flow_p,
-                "q": flow.q,
+                "q": round(flow.q, 1),
                 "tara_q": branches[idx].flow_q,
                 "r": branches[idx].br_r,
                 "x": branches[idx].br_x,
@@ -620,8 +608,8 @@ def print_branch_flows(bus: BusEnergyBalance, branches):
 
     result = pd.DataFrame(rows)
     print(result.to_string(index=False))
-    print("Total p: ", result["p"].sum(), "Tara p: ", result["tara_p"].sum())
-    print("Total q: ", result["q"].sum(), "Tara q: ", result["tara_q"].sum())
+    print("Total p: ", int(result["p"].sum()), "Tara p: ", int(result["tara_p"].sum()))
+    print("Total q: ", int(result["q"].sum()), "Tara q: ", int(result["tara_q"].sum()))
 
 
 def print_bus_balance_summary(
@@ -674,8 +662,17 @@ def print_bus_balance_summary(
             f"{v.id:>10} | {t_str:<6} | {v.v_mag:>7.4f} | {v.v_angle:>8.2f} | {v.p_mismatch:>16.4f} | {v.q_mismatch:>18.4f} | {flow} | {gen} | {load} | {shunt} | {miss}"
         )
     print("=" * 140 + "\n")
-    print_branch_flows(id_to_bus[violations[0].id], branches)
-    print(id_to_bus[violations[0].id])
+    bus = id_to_bus[violations[0].id]
+    print("\n" + "Largest violation bus: ", bus.bus_id)
+    print(f"vm: {bus.vm} va: {bus.va} type: {bus.bus_type} voltage: {bus.base_kv}\n")
+    print("Shunts:")
+    print(bus.shunts)
+    print("Loads:")
+    print(bus.loads)
+    print("Generators:")
+    print(bus.generations)
+    print("Flows:")
+    print_branch_flows(bus, branches)
 
     print("\n" + "=" * 140)
 
@@ -895,10 +892,6 @@ if __name__ == "__main__":
     tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
     mpc = MatpowerCase.from_tara(tara_file_dir)
     mpc = mpc.extract_main_island()
-    # mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/raw.mat")
-    # mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/raw.mat")
-    # id_to_bus = build_bus_energy_balances(mpc)
-    # mpc = merge_zero_impedance_branches(mpc, id_to_bus)
     mpc = recalc_rx_based_on_flow(mpc)
 
     # Re-evaluate energy balance after topology updates
@@ -919,8 +912,10 @@ if __name__ == "__main__":
         # bus.pd -= violation_p.get(bus.bus_i, 0)
         bus.qd -= violation_q.get(bus.bus_i, 0)
 
-    mpc.extract_main_island().to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
-    mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
+    mpc = extract_areas(mpc, PJM_AREAS)
+
+    mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/pjm.mat")
+    mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/pjm.mat")
 
     id_to_bus = build_bus_energy_balances(mpc)
     validate_matpower_energy_balance(

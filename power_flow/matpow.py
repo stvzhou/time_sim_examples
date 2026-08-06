@@ -472,7 +472,6 @@ def parse_matpower_m(filepath_or_str: Union[str, Path, os.PathLike]) -> Dict[str
 
     Returns:
         Dictionary containing keys such as 'version', 'baseMVA', 'bus', 'gen', 'branch',
-        'gencost', etc.
     """
     is_path = False
     try:
@@ -710,7 +709,6 @@ class MatpowerCase:
         bus: List of Bus instances
         gen: List of Generator instances
         branch: List of Branch instances
-        gencost: Optional generator cost matrix
     """
 
     version: str = "2"
@@ -718,9 +716,9 @@ class MatpowerCase:
     bus: List[Bus] = field(default_factory=list)
     gen: List[Generator] = field(default_factory=list)
     branch: List[Branch] = field(default_factory=list)
-    gencost: Optional[np.ndarray] = None
     star_buses: Dict[int, List[int]] = field(default_factory=lambda: {})
     bus_miss: Dict[int, Flow] = field(default_factory=lambda: {})
+    area_name_to_id: Dict[str, int] = field(default_factory=lambda: {})
 
     def to_dict(self) -> Dict[str, Any]:
         """Export case as standard MATPOWER dictionary with numpy matrices."""
@@ -747,8 +745,7 @@ class MatpowerCase:
             "gen": gen_mat,
             "branch": branch_mat,
         }
-        if self.gencost is not None:
-            d["gencost"] = self.gencost
+
         return d
 
     def to_mat(
@@ -827,21 +824,6 @@ class MatpowerCase:
             lines.append(f"\t{row_str};")
         lines.append("];\n")
 
-        if self.gencost is not None and len(self.gencost) > 0:
-            lines.extend([
-                "%%-----  OPF Data  -----%%",
-                "%% generator cost data",
-                "%\t1\tstartup\tshutdown\tn\tx1\ty1\t...\txn\tyn",
-                "%\t2\tstartup\tshutdown\tn\tc(n-1)\t...\tc0",
-                "mpc.gencost = [",
-            ])
-            for gc in self.gencost:
-                row_str = "\t".join(
-                    f"{v:g}" if isinstance(v, (int, float)) else str(v) for v in gc
-                )
-                lines.append(f"\t{row_str};")
-            lines.append("];\n")
-
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(str(path), "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -872,7 +854,6 @@ class MatpowerCase:
         buses = [Bus.from_array(row) for row in _ensure_2d(d.get("bus"))]
         generators = [Generator.from_array(row) for row in _ensure_2d(d.get("gen"))]
         branches = [Branch.from_array(row) for row in _ensure_2d(d.get("branch"))]
-        gencost = d.get("gencost")
 
         return cls(
             version=version,
@@ -880,7 +861,6 @@ class MatpowerCase:
             bus=buses,
             gen=generators,
             branch=branches,
-            gencost=gencost,
         )
 
     @classmethod
@@ -938,8 +918,6 @@ class MatpowerCase:
                 "gen": getattr(raw_case, "gen", []),
                 "branch": getattr(raw_case, "branch", []),
             }
-            if hasattr(raw_case, "gencost"):
-                d["gencost"] = getattr(raw_case, "gencost")
         elif isinstance(raw_case, dict):
             d = raw_case
         else:
@@ -1232,6 +1210,10 @@ class MatpowerCase:
         vsc = pd.read_csv(os.path.join(file_dir, "VSCData.csv"), skiprows=9)
         shunts = pd.read_csv(os.path.join(file_dir, "ShuntData.csv"), skiprows=9)
         bus_mis = pd.read_csv(os.path.join(file_dir, "BusMism.csv"), skiprows=9)
+        area_sum = pd.read_csv(os.path.join(file_dir, "AreaSum.csv"), skiprows=9)
+        multi_term_dc_loads = parse_multiterminal_dc(os.path.join(file_dir, "DCLineBusFlows.csv"))
+        hvdc_loads = parse_hvdc(os.path.join(file_dir, "DCLineBusFlows.csv"))
+
         bus.columns = bus.columns.str.strip()
         load.columns = load.columns.str.strip()
         gen.columns = gen.columns.str.strip()
@@ -1239,9 +1221,7 @@ class MatpowerCase:
         vsc.columns = vsc.columns.str.strip()
         shunts.columns = shunts.columns.str.strip()
         bus_mis.columns = bus_mis.columns.str.strip()
-
-        multi_term_dc_loads = parse_multiterminal_dc(os.path.join(file_dir, "DCLineBusFlows.csv"))
-        hvdc_loads = parse_hvdc(os.path.join(file_dir, "DCLineBusFlows.csv"))
+        area_sum.columns = area_sum.columns.str.strip()
 
         load = load[load["St"] == 1]
         load["P"] = load["ActLoad"]
@@ -1371,6 +1351,10 @@ class MatpowerCase:
                 q=float(row["QMism"]),
             )
 
+        area_name_to_id = {}
+        for _, row in area_sum.iterrows():
+            area_name_to_id[row["AreaName"].strip()] = row["Area"]
+
         return cls(
             version="2",
             baseMVA=base_mva,
@@ -1378,6 +1362,7 @@ class MatpowerCase:
             gen=[g for g in mat_gens if g.gen_status == 1],
             branch=[b for b in mat_branches if b.br_status == 1],
             bus_miss=bus_miss,
+            area_name_to_id=area_name_to_id,
         )
 
     def summary(self) -> Dict[str, Any]:
@@ -1443,6 +1428,7 @@ class MatpowerCase:
                    and br.br_status
             ],
             bus_miss={k: v for k, v in self.bus_miss.items() if k in main_island},
+            area_name_to_id=self.area_name_to_id,
         )
 
 
