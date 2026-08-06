@@ -143,6 +143,7 @@ def calc_bus_balance(bus: BusEnergyBalance) -> Flow:
 
     # Shunt injections (injected power reduces deficit, so subtracted)
     for flow in bus.shunts.values():
+        p -= flow.p
         q -= flow.q
 
     # Loads (power demanded / leaving bus)
@@ -462,8 +463,6 @@ class ValidationReport:
     num_branches: int
     max_p_mismatch: float
     max_q_mismatch: float
-    rms_p_mismatch: float
-    rms_q_mismatch: float
     max_p_bus: Union[int, str]
     max_q_bus: Union[int, str]
     total_p_gen: float
@@ -496,8 +495,6 @@ class ValidationReport:
             "  POWER MISMATCH SUMMARY:",
             f"    Max |P| Mismatch:       {self.max_p_mismatch:>14.6f} MW   (at Bus {self.max_p_bus})",
             f"    Max |Q| Mismatch:       {self.max_q_mismatch:>14.6f} MVAr (at Bus {self.max_q_bus})",
-            f"    RMS P Mismatch:         {self.rms_p_mismatch:>14.6f} MW",
-            f"    RMS Q Mismatch:         {self.rms_q_mismatch:>14.6f} MVAr",
             f"    P / Q Tolerance:        {self.tolerance_p:.4f} MW / {self.tolerance_q:.4f} MVAr",
             f"    Tolerance Violations:   {self.num_violations:,d} buses",
             "-" * 70,
@@ -780,10 +777,6 @@ def validate_matpower_energy_balance(
         total_p_shunt += shunt.p
         total_q_shunt += shunt.q
 
-    # RMS mismatch
-    rms_p = math.sqrt(sum(p ** 2 for p in p_mismatches) / max(len(p_mismatches), 1))
-    rms_q = math.sqrt(sum(q ** 2 for q in q_mismatches) / max(len(q_mismatches), 1))
-
     # Total branch losses = Gen - Load + Shunt
     total_p_loss = total_p_gen - total_p_load + total_p_shunt
     total_q_loss = total_q_gen - total_q_load + total_q_shunt
@@ -811,8 +804,6 @@ def validate_matpower_energy_balance(
         num_branches=num_branches,
         max_p_mismatch=max_p_val,
         max_q_mismatch=max_q_val,
-        rms_p_mismatch=rms_p,
-        rms_q_mismatch=rms_q,
         max_p_bus=max_p_bus,
         max_q_bus=max_q_bus,
         total_p_gen=total_p_gen,
@@ -925,7 +916,7 @@ if __name__ == "__main__":
     violation_p = {v.id: v.p_mismatch for v in violations}
     violation_q = {v.id: v.q_mismatch for v in violations}
     for bus in mpc.bus:
-        bus.pd -= violation_p.get(bus.bus_i, 0)
+        # bus.pd -= violation_p.get(bus.bus_i, 0)
         bus.qd -= violation_q.get(bus.bus_i, 0)
 
     mpc.extract_main_island().to_mat("/usr/local/google/home/sxzhou/Downloads/test.mat")
@@ -945,7 +936,7 @@ if __name__ == "__main__":
         MODEL="AC",  # AC power flow model
         PF_ALG=1,  # 1 = Newton-Raphson ('NR')
         PF_TOL=1e-3,  # Convergence tolerance
-        PF_MAX_IT=20,  # Maximum iteration limit
+        PF_MAX_IT=40,  # Maximum iteration limit
         ENFORCE_Q_LIMS=0,  # 0 = Do not enforce Q limits initially
         OUT_ALL=0,  # Do not print bus/branch/gen result tables
         VERBOSE=1,  # Print solver progress info
