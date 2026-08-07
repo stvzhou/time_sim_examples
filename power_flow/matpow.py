@@ -1,37 +1,18 @@
-"""MATPOWER 5.0 case format classes, parser, and PSS/E RAW validation.
-
-Follows the MATPOWER 5.0 Case Format specification:
-https://matpower.org/docs/ref/matpower5.0/caseformat.html
-
-Defines:
-- Bus: MATPOWER bus matrix row representation (columns 1-13 + optional OPF cols)
-- Generator: MATPOWER gen matrix row representation (columns 1-21 + optional OPF cols)
-- Branch: MATPOWER branch matrix row representation (columns 1-13 + optional results cols)
-- MatpowerCase: Complete MATPOWER power flow case container supporting .m files, .mat files, dicts, and PSS/E RAW conversion.
-- parse_matpower_m: Standalone parser for MATLAB .m case files into MATPOWER dictionary format.
-"""
-
 from __future__ import annotations
-
 import os
 import re
-import sys
 from io import StringIO
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import networkx as nx
-
-# Ensure power_flow directory is in python path
-_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
-if _PKG_DIR not in sys.path:
-    sys.path.insert(0, _PKG_DIR)
-
-from psse_raw import PsseRawData, parse_raw
+from pandas import DataFrame
+from pandas.io.parsers import TextFileReader
+from psse_raw import PsseRawData
 
 
 class FlowMeter(Enum):
@@ -699,6 +680,158 @@ class Flow:
     q: float = 0.0
 
 
+def _build_bus_load(facts: DataFrame, load: DataFrame, bus_vm: Dict[int, float]) -> tuple[dict, dict]:
+    load = load[load["St"] == 1]
+    load["P"] = load["ActLoad"]
+    load["vm"] = load["Bus#"].map(lambda x: bus_vm[x])
+    load["Q"] = load["Qconst"] + load["Qcurrt"] * load["vm"] - load["QAdmit"] * load["vm"] * load["vm"]
+    bus_p = load.groupby("Bus#")["P"].sum().to_dict()
+    bus_q = load.groupby("Bus#")["Q"].sum().to_dict()
+    facts = facts[facts["Mode"] == 1]
+    facts_q = facts.groupby("SendBus")["QMVAR (negative means generating VARs)"].sum().to_dict()
+    for bus_id, q in facts_q.items():
+        if bus_id not in bus_q:
+            bus_q[bus_id] = 0
+        bus_q[bus_id] -= q
+    return bus_p, bus_q
+
+
+def _build_line_shunts(base_mva: float, branch: DataFrame, bus: DataFrame, vsc_lines: set[Any]) -> tuple[
+    defaultdict[Any, float], defaultdict[Any, float]]:
+    line_shunts_p = defaultdict(float)
+    line_shunts_q = defaultdict(float)
+    v_square = {b["Bus#"]: b["Vmag [PU]"] ** 2 for _, b in bus.iterrows()}
+    for _, b in branch.iterrows():
+        if (b["Fr Bus"], b["To Bus"]) in vsc_lines:
+            continue
+        if not pd.isna(b["X"]) and int(b["St"]) == 1:
+            line_shunts_p[b["Fr Bus"]] += (
+                    b["ShuntGFrom"] * v_square.get(b["Fr Bus"], 1) * base_mva
+            )
+            line_shunts_q[b["Fr Bus"]] -= (
+                    b["ShuntBFrom"] * v_square.get(b["Fr Bus"], 1) * base_mva
+            )
+            line_shunts_p[b["To Bus"]] += (
+                    b["ShuntGTo"] * v_square.get(b["To Bus"], 1) * base_mva
+            )
+            line_shunts_q[b["To Bus"]] -= (
+                    b["ShuntBTo"] * v_square.get(b["To Bus"], 1) * base_mva
+            )
+    return line_shunts_p, line_shunts_q
+
+
+def _build_hvdc_loads(hvdc_loads: dict, multi_term_dc_loads: dict) -> tuple[
+    defaultdict[Any, float], defaultdict[Any, float]]:
+    hvdc_p = defaultdict(float)
+    hvdc_q = defaultdict(float)
+    for bus_id, flow in hvdc_loads.items():
+        hvdc_p[bus_id] += flow["p"]
+        hvdc_q[bus_id] += flow["q"]
+
+    for bus_id, dc_loads in multi_term_dc_loads.items():
+        hvdc_p[bus_id] += dc_loads["p"]
+        hvdc_q[bus_id] += dc_loads["q"]
+    return hvdc_p, hvdc_q
+
+
+def _build_matpow_branch(branch: TextFileReader | DataFrame) -> list[Any]:
+    mat_branches = []
+    for _, b in branch.iterrows():
+        if pd.isna(b["X"]):
+            # HVDC
+            continue
+        ratio = float(b["TranRat"])
+        if ratio == 0:
+            ratio = 1
+        r = float(b["R"])
+        x = float(b["X"])
+        mat_branches.append(
+            Branch(
+                f_bus=b["Fr Bus"],
+                t_bus=b["To Bus"],
+                br_r=r,
+                br_x=x,
+                br_b=float(b["Charg"]),
+                rate_a=float(b["RateA"]),
+                rate_b=float(b["RateB"]),
+                rate_c=float(b["RateC"]),
+                tap=ratio,
+                shift=float(b["PhsShftDeg"]),
+                br_status=int(b["St"]),
+                flow_meter=FlowMeter(b["Mt"].strip()),
+                flow_p=float(b["MW_Flow"]),
+                flow_q=float(b["MVAr_flow"]),
+                loss_p=float(b["LossesMW"]),
+                loss_q=float(b["LossesMVAr"]),
+                gs_from=float(b["ShuntGFrom"]),
+                bs_from=float(b["ShuntBFrom"]),
+                gs_to=float(b["ShuntGTo"]),
+                bs_to=float(b["ShuntBTo"]),
+            )
+        )
+    return mat_branches
+
+
+def _build_matpow_gen(base_mva: float, bus_to_vm: dict[int, float], gen: TextFileReader | DataFrame) -> list[
+    Generator]:
+    mat_gens: List[Generator] = []
+    for _, g in gen.iterrows():
+        mat_gens.append(
+            Generator(
+                gen_bus=g["Bus#"],
+                pg=g["POn"],
+                qg=g["QGen"],
+                qmax=g["Qmax"],
+                qmin=g["Qmin"],
+                vg=bus_to_vm.get(g["Bus#"], 1.0),
+                mbase=base_mva,
+                gen_status=g["Sta"],
+                pmax=g["Pmax"],
+                pmin=g["Pmin"],
+            )
+        )
+    return mat_gens
+
+
+def _build_matpow_bus(bus: TextFileReader | DataFrame, bus_p: dict, bus_q: dict,
+                      hvdc_p: defaultdict[Any, float], hvdc_q: defaultdict[Any, float],
+                      line_shunts_p: defaultdict[Any, float], line_shunts_q: defaultdict[Any, float],
+                      shunt_to_p: dict, shunt_to_q: dict) -> list[Bus]:
+    mat_buses: List[Bus] = []
+    for _, b in bus.iterrows():
+        bs = shunt_to_q.get(b["Bus#"], 0) / (b["Vmag [PU]"] ** 2)
+        if b["BTyp"] == "LOAD":
+            bs += -b["QGen"] / (b["Vmag [PU]"] ** 2)
+        mat_buses.append(
+            Bus(
+                bus_i=b["Bus#"],
+                bus_type=b["CodeBTyp"],
+                pd=bus_p.get(b["Bus#"], 0)
+                   + hvdc_p.get(b["Bus#"], 0)
+                   + line_shunts_p.get(b["Bus#"], 0),
+                qd=bus_q.get(b["Bus#"], 0)
+                   + hvdc_q.get(b["Bus#"], 0)
+                   + line_shunts_q.get(b["Bus#"], 0),
+                gs=shunt_to_p.get(b["Bus#"], 0) / (b["Vmag [PU]"] ** 2),
+                bs=bs,
+                bus_area=b["Area"],
+                vm=b["Vmag [PU]"],
+                va=b["Vangle"],
+                base_kv=b["Volt"],
+                zone=b["Zone"],
+                vmax=1.5,
+                vmin=0.5,
+            )
+        )
+    return mat_buses
+
+
+def read_tara_report(file_dir: str, file_name: str) -> pd.DataFrame:
+    report = pd.read_csv(os.path.join(file_dir, file_name), skiprows=9)
+    report.columns = report.columns.str.strip()
+    return report
+
+
 @dataclass
 class MatpowerCase:
     """MATPOWER 5.0 Case container holding baseMVA, bus, gen, and branch matrices.
@@ -1203,157 +1336,39 @@ class MatpowerCase:
     @classmethod
     def from_tara(cls, file_dir=str) -> MatpowerCase:
         base_mva = 100.0
-        bus = pd.read_csv(os.path.join(file_dir, "BusData.csv"), skiprows=9)
-        load = pd.read_csv(os.path.join(file_dir, "LoadData.csv"), skiprows=9)
-        gen = pd.read_csv(os.path.join(file_dir, "GenData.csv"), skiprows=9)
-        branch = pd.read_csv(os.path.join(file_dir, "BranchData.csv"), skiprows=9)
-        vsc = pd.read_csv(os.path.join(file_dir, "VSCData.csv"), skiprows=9)
-        shunts = pd.read_csv(os.path.join(file_dir, "ShuntData.csv"), skiprows=9)
-        bus_mis = pd.read_csv(os.path.join(file_dir, "BusMism.csv"), skiprows=9)
-        area_sum = pd.read_csv(os.path.join(file_dir, "AreaSum.csv"), skiprows=9)
+        bus = read_tara_report(file_dir, "BusData.csv")
+        load = read_tara_report(file_dir, "LoadData.csv")
+        gen = read_tara_report(file_dir, "GenData.csv")
+        branch = read_tara_report(file_dir, "BranchData.csv")
+        vsc = read_tara_report(file_dir, "VSCData.csv")
+        shunts = read_tara_report(file_dir, "ShuntData.csv")
+        bus_mis = read_tara_report(file_dir, "BusMism.csv")
+        area_sum = read_tara_report(file_dir, "AreaSum.csv")
+        facts = read_tara_report(file_dir, "FACTS.csv")
         multi_term_dc_loads = parse_multiterminal_dc(os.path.join(file_dir, "DCLineBusFlows.csv"))
         hvdc_loads = parse_hvdc(os.path.join(file_dir, "DCLineBusFlows.csv"))
 
-        bus.columns = bus.columns.str.strip()
-        load.columns = load.columns.str.strip()
-        gen.columns = gen.columns.str.strip()
-        branch.columns = branch.columns.str.strip()
-        vsc.columns = vsc.columns.str.strip()
-        shunts.columns = shunts.columns.str.strip()
-        bus_mis.columns = bus_mis.columns.str.strip()
-        area_sum.columns = area_sum.columns.str.strip()
-
-        load = load[load["St"] == 1]
-        load["P"] = load["ActLoad"]
-        load["Q"] = load["Qconst"] + load["Qcurrt"] - load["QAdmit"]
-        bus_p = load.groupby("Bus#")["P"].sum().to_dict()
-        bus_q = load.groupby("Bus#")["Q"].sum().to_dict()
-
-        hvdc_p = defaultdict(float)
-        hvdc_q = defaultdict(float)
-        for bus_id, flow in hvdc_loads.items():
-            hvdc_p[bus_id] += flow["p"]
-            hvdc_q[bus_id] += flow["q"]
-
+        bus_p, bus_q = _build_bus_load(facts, load, dict(zip(bus["Bus#"], bus["Vmag [PU]"])))
+        hvdc_p, hvdc_q = _build_hvdc_loads(hvdc_loads, multi_term_dc_loads)
         vsc_lines = {(b["Bus#"], b["Bus#.1"]) for _, b in vsc.iterrows()}
-
-        for bus_id, dc_loads in multi_term_dc_loads.items():
-            hvdc_p[bus_id] += dc_loads["p"]
-            hvdc_q[bus_id] += dc_loads["q"]
-
-        line_shunts_p = defaultdict(float)
-        line_shunts_q = defaultdict(float)
-        v_square = {b["Bus#"]: b["Vmag [PU]"] ** 2 for _, b in bus.iterrows()}
-        for _, b in branch.iterrows():
-            if (b["Fr Bus"], b["To Bus"]) in vsc_lines:
-                continue
-            if not pd.isna(b["X"]) and int(b["St"]) == 1:
-                line_shunts_p[b["Fr Bus"]] += (
-                        b["ShuntGFrom"] * v_square.get(b["Fr Bus"], 1) * base_mva
-                )
-                line_shunts_q[b["Fr Bus"]] -= (
-                        b["ShuntBFrom"] * v_square.get(b["Fr Bus"], 1) * base_mva
-                )
-                line_shunts_p[b["To Bus"]] += (
-                        b["ShuntGTo"] * v_square.get(b["To Bus"], 1) * base_mva
-                )
-                line_shunts_q[b["To Bus"]] -= (
-                        b["ShuntBTo"] * v_square.get(b["To Bus"], 1) * base_mva
-                )
+        line_shunts_p, line_shunts_q = _build_line_shunts(base_mva, branch, bus, vsc_lines)
 
         shunts = shunts[shunts["Status"] == 1]
         shunt_to_q = shunts.groupby("Bus#")["ShuntMVar"].sum().to_dict()
         shunt_to_p = shunts.groupby("Bus#")["ShuntMW"].sum().to_dict()
 
-        mat_buses: List[Bus] = []
-        for _, b in bus.iterrows():
-            bs = shunt_to_q.get(b["Bus#"], 0) / (b["Vmag [PU]"] ** 2)
-            if b["BTyp"] == "LOAD":
-                bs += -b["QGen"] / (b["Vmag [PU]"] ** 2)
-            mat_buses.append(
-                Bus(
-                    bus_i=b["Bus#"],
-                    bus_type=b["CodeBTyp"],
-                    pd=bus_p.get(b["Bus#"], 0)
-                       + hvdc_p.get(b["Bus#"], 0)
-                       + line_shunts_p.get(b["Bus#"], 0),
-                    qd=bus_q.get(b["Bus#"], 0)
-                       + hvdc_q.get(b["Bus#"], 0)
-                       + line_shunts_q.get(b["Bus#"], 0),
-                    gs=shunt_to_p.get(b["Bus#"], 0) / (b["Vmag [PU]"] ** 2),
-                    bs=bs,
-                    bus_area=b["Area"],
-                    vm=b["Vmag [PU]"],
-                    va=b["Vangle"],
-                    base_kv=b["Volt"],
-                    zone=b["Zone"],
-                    vmax=1.5,
-                    vmin=0.5,
-                )
-            )
+        mat_buses = _build_matpow_bus(bus, bus_p, bus_q, hvdc_p, hvdc_q, line_shunts_p, line_shunts_q, shunt_to_p,
+                                      shunt_to_q)
         bus_to_vm = {b.bus_i: b.vm for b in mat_buses}
-        mat_gens: List[Generator] = []
-        for _, g in gen.iterrows():
-            mat_gens.append(
-                Generator(
-                    gen_bus=g["Bus#"],
-                    pg=g["POn"],
-                    qg=g["QGen"],
-                    qmax=g["Qmax"],
-                    qmin=g["Qmin"],
-                    vg=bus_to_vm.get(g["Bus#"], 1.0),
-                    mbase=base_mva,
-                    gen_status=g["Sta"],
-                    pmax=g["Pmax"],
-                    pmin=g["Pmin"],
-                )
-            )
+        mat_gens = _build_matpow_gen(base_mva, bus_to_vm, gen)
+        mat_branches = _build_matpow_branch(branch)
 
-        mat_branches = []
-        for _, b in branch.iterrows():
-            if pd.isna(b["X"]):
-                # HVDC
-                continue
-            ratio = float(b["TranRat"])
-            if ratio == 0:
-                ratio = 1
-            r = float(b["R"])
-            x = float(b["X"])
-            mat_branches.append(
-                Branch(
-                    f_bus=b["Fr Bus"],
-                    t_bus=b["To Bus"],
-                    br_r=r,
-                    br_x=x,
-                    br_b=float(b["Charg"]),
-                    rate_a=float(b["RateA"]),
-                    rate_b=float(b["RateB"]),
-                    rate_c=float(b["RateC"]),
-                    tap=ratio,
-                    shift=float(b["PhsShftDeg"]),
-                    br_status=int(b["St"]),
-                    flow_meter=FlowMeter(b["Mt"].strip()),
-                    flow_p=float(b["MW_Flow"]),
-                    flow_q=float(b["MVAr_flow"]),
-                    loss_p=float(b["LossesMW"]),
-                    loss_q=float(b["LossesMVAr"]),
-                    gs_from=float(b["ShuntGFrom"]),
-                    bs_from=float(b["ShuntBFrom"]),
-                    gs_to=float(b["ShuntGTo"]),
-                    bs_to=float(b["ShuntBTo"]),
-                )
-            )
+        bus_miss = {row["Bus#"]: Flow(
+            p=float(row["PMism"]),
+            q=float(row["QMism"]),
+        ) for _, row in bus_mis.iterrows()}
 
-        bus_miss = {}
-        for _, row in bus_mis.iterrows():
-            bus_miss[row["Bus#"]] = Flow(
-                p=float(row["PMism"]),
-                q=float(row["QMism"]),
-            )
-
-        area_name_to_id = {}
-        for _, row in area_sum.iterrows():
-            area_name_to_id[row["AreaName"].strip()] = row["Area"]
+        area_name_to_id = {row["AreaName"].strip(): row["Area"] for _, row in area_sum.iterrows()}
 
         return cls(
             version="2",

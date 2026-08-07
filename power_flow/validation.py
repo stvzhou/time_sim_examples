@@ -889,7 +889,7 @@ if __name__ == "__main__":
     #     "/usr/local/google/home/sxzhou/Downloads/2024Series2029SUM.mat"
     # )
     # mpc = MatpowerCase.from_m("/usr/local/google/home/sxzhou/Downloads/ACTIVSg2000.m")
-    tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/"
+    tara_file_dir = "/usr/local/google/home/sxzhou/Downloads/2025_series_2032_winter"
     mpc = MatpowerCase.from_tara(tara_file_dir)
     mpc = mpc.extract_main_island()
     mpc = recalc_rx_based_on_flow(mpc)
@@ -914,8 +914,9 @@ if __name__ == "__main__":
 
     mpc = extract_areas(mpc, PJM_AREAS)
 
-    mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/pjm.mat")
-    mpc = MatpowerCase.from_mat("/usr/local/google/home/sxzhou/Downloads/pjm.mat")
+    mpc.to_mat("/usr/local/google/home/sxzhou/Downloads/2025_series_2032_winter/2025_series_2032_winter.mat")
+    mpc = MatpowerCase.from_mat(
+        "/usr/local/google/home/sxzhou/Downloads/2025_series_2032_winter/2025_series_2032_winter.mat")
 
     id_to_bus = build_bus_energy_balances(mpc)
     validate_matpower_energy_balance(
